@@ -1,0 +1,73 @@
+services:
+  app:
+    build:
+      context: ${SOURCE_DIR:-.}
+    image: timesgate-web:0.1.0
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${ADMIN_BIND:-0.0.0.0}:${ADMIN_PORT:-8080}:8080"
+    environment:
+      APP_BASE_URL: ${APP_BASE_URL:?Set APP_BASE_URL to the browser-facing origin}
+      MEDIA_BASE_URL: ${MEDIA_BASE_URL:?Set MEDIA_BASE_URL to the device-facing HTTP origin}
+      TZ: ${TZ:-Europe/Lisbon}
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:?Set DATA_DIR to the private application data folder}
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MEDIA_DIR:?Set MEDIA_DIR to the published media folder}
+        target: /media
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  media:
+    image: nginx:stable-alpine
+    user: "10001:10001"
+    restart: unless-stopped
+    ports:
+      - "${MEDIA_BIND:-0.0.0.0}:${MEDIA_PORT:-8081}:8081"
+    volumes:
+      - type: bind
+        source: ${MEDIA_DIR:?Set MEDIA_DIR to the published media folder}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SOURCE_DIR:-.}/deploy/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    entrypoint: [nginx]
+    command: [-g, "daemon off;"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
