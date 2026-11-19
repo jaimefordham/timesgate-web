@@ -65,6 +65,16 @@ Nginx can read only the media directory. It serves only opaque generated
 filenames matching `/[32 lowercase hex characters].gif`; there is no directory
 listing, upload handler, application database or credential mount in that service.
 
+## Container image publishing
+
+GitHub Actions tests and publishes the application and media images only when a
+GitHub Release is published. Ordinary commits, pushes and tag creation do not
+trigger the workflow. Use a release tag such as `v0.1.1` to publish both
+`ghcr.io/jaimefordham/timesgate-web:0.1.1` and
+`ghcr.io/jaimefordham/timesgate-web-media:0.1.1`.
+Stable releases also update both `latest` tags; prereleases do not.
+Wait for the workflow to succeed before pulling the images on OMV.
+
 ## Start with Docker Compose
 
 For **OpenMediaVault 8 / ARM64**, use the detailed
