@@ -8,9 +8,18 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageChops, ImageColor
 
-from timesgate.models import Configuration, DesignLayer, Screen, WIDGET_ACCENTS
+from timesgate.models import Configuration, DesignLayer, Screen, WIDGET_ACCENTS, WIDGET_BACKGROUNDS
 from timesgate.render import render
 from timesgate.widgets import MAX_RESPONSE, Weather, WidgetSources, feed_titles, fetch_public
+
+
+def luminance(rgb: tuple[int, int, int]) -> float:
+    channels = [channel / 255 for channel in rgb]
+    linear = [
+        channel / 12.92 if channel <= 0.04045 else ((channel + .055) / 1.055) ** 2.4
+        for channel in channels
+    ]
+    return sum(value * weight for value, weight in zip(linear, (.2126, .7152, .0722)))
 
 
 class WidgetModelTests(unittest.TestCase):
@@ -41,7 +50,8 @@ class WidgetModelTests(unittest.TestCase):
             Screen(kind="weather", latitude=38.7, longitude=-9.1),
             Screen(kind="countdown", target="2026-12-25T00:00"),
             Screen(kind="rss", url="https://example.com/feed"),
-            Screen(kind="custom", elements=[DesignLayer(text="{time} {cpu} {{literal}}")]),
+            Screen(kind="custom", background="#ffffff",
+                   elements=[DesignLayer(text="{time} {cpu} {{literal}}")]),
         ]
         restored = Configuration.model_validate_json(config.model_dump_json())
         self.assertEqual(restored, config)
@@ -215,14 +225,6 @@ class WidgetRenderTests(unittest.TestCase):
         return [call.args[2] for call in text.call_args_list]
 
     def test_accents_recolour_headers_and_labels_preserving_white_values_and_contrast(self):
-        def luminance(rgb):
-            channels = [channel / 255 for channel in rgb]
-            linear = [
-                channel / 12.92 if channel <= 0.04045 else ((channel + .055) / 1.055) ** 2.4
-                for channel in channels
-            ]
-            return sum(value * weight for value, weight in zip(linear, (.2126, .7152, .0722)))
-
         now = datetime(2026, 11, 18, 12, 34, tzinfo=ZoneInfo("UTC"))
         for accent in ("original", *WIDGET_ACCENTS):
             for kind in ("clock", "text", "weather", "countdown", "rss", "strava"):
@@ -258,6 +260,34 @@ class WidgetRenderTests(unittest.TestCase):
                             luminance(image.getpixel((0, 0))) + .05
                         )
                         self.assertGreaterEqual(contrast, 7)
+
+    def test_background_palette_is_applied_and_all_standard_text_passes_contrast(self):
+        for background in WIDGET_BACKGROUNDS:
+            for accent in ("original", *WIDGET_ACCENTS):
+                for kind in ("clock", "text", "weather", "countdown", "rss", "strava"):
+                    with self.subTest(background=background, accent=accent, kind=kind):
+                        screen = Screen(
+                            kind=kind, accent=accent, background=background,
+                            text="Readable", latitude=0, longitude=0,
+                            target="2099-12-25T00:00", url="https://example.com/feed",
+                        )
+                        with patch(
+                            "timesgate.render.ImageDraw.ImageDraw.text", autospec=True,
+                        ) as text:
+                            image = render(
+                                screen, "UTC", weather=Weather(10, 70, 95),
+                                headline="Readable", preview=True,
+                            )
+                        self.assertEqual(image.getpixel((0, 0)), ImageColor.getrgb(background))
+                        for colour in {call.kwargs["fill"] for call in text.call_args_list}:
+                            foreground = luminance(ImageColor.getrgb(colour))
+                            canvas = luminance(image.getpixel((0, 0)))
+                            ratio = (max(foreground, canvas) + .05) / (
+                                min(foreground, canvas) + .05
+                            )
+                            self.assertGreaterEqual(ratio, 4.5, colour)
+        custom = render(Screen(kind="custom", background="#211326"), "UTC")
+        self.assertEqual(custom.getpixel((0, 0)), (33, 19, 38))
 
     def test_strava_layout_prioritizes_numbers_and_omits_elevation_in_both_modes(self):
         stats = {"distance": 1609344, "count": 42, "moving_time": 181800}

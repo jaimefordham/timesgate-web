@@ -29,6 +29,16 @@ WIDGET_ACCENTS = {
     "glacier-blue": {"name": "Glacier Blue", "color": "#72B7FF"},
 }
 
+WIDGET_BACKGROUNDS = {
+    "#08121e": "Very dark navy (default)",
+    "#000000": "Black",
+    "#161616": "Charcoal",
+    "#141c26": "Slate",
+    "#0c2118": "Forest",
+    "#211326": "Plum",
+    "#24180f": "Espresso",
+}
+
 
 def widget_url(value: str) -> str:
     parsed = urlsplit(value)

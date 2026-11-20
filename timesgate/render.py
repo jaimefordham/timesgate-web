@@ -96,7 +96,7 @@ def render(screen: Screen, timezone: str, cache: dict | None = None,
     now = now or datetime.now(ZoneInfo(timezone))
     if screen.kind == "custom":
         return custom_image(screen, now, metrics or {}, media_dir)
-    image = Image.new("RGB", (128, 128), "#08121e")
+    image = Image.new("RGB", (128, 128), screen.background)
     draw = ImageDraw.Draw(image)
     accent = "#fc4c02" if screen.kind == "strava" else "#65e0c8"
     if screen.accent != "original":

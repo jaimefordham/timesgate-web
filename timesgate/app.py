@@ -21,7 +21,7 @@ from .media import MAX_UPLOAD, normalize, publish
 from .models import (
     ConfigUpdate, ControlRequest, DeviceProfile, LightingPreset, LightingRequest,
     LightingRestoreRequest, LightingSettings, ProfileName, SendRequest, StravaSettings,
-    WIDGET_ACCENTS, http_base,
+    WIDGET_ACCENTS, WIDGET_BACKGROUNDS, http_base,
 )
 from .store import Conflict, Store
 from .strava import Strava, StravaError
@@ -181,6 +181,7 @@ def create_app(data_dir: Path | None = None, media_dir: Path | None = None, *,
                 "media": store.media(), "jobs": store.jobs(), "schedules": store.schedules(),
                 "strava": app.state.strava.status(), "demo": demo,
                 "widget_accents": WIDGET_ACCENTS,
+                "widget_backgrounds": WIDGET_BACKGROUNDS,
                 "lighting": store.lighting(),
                 "lighting_restoration": store.lighting_restoration(),
                 "controls": store.controls(), "device_schedules": store.device_schedules(),

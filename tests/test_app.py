@@ -12,7 +12,8 @@ from PIL import Image
 from timesgate.app import create_app
 from timesgate.engine import Engine
 from timesgate.models import (
-    Configuration, DesignLayer, Device, DeviceProfile, LightingSettings, Screen, WIDGET_ACCENTS,
+    Configuration, DesignLayer, Device, DeviceProfile, LightingSettings, Screen,
+    WIDGET_ACCENTS, WIDGET_BACKGROUNDS,
 )
 from timesgate.store import Store
 
@@ -591,15 +592,17 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Selected media does not exist", response.text)
 
-    def test_accents_persist_independently_and_match_preview_and_published_gifs(self):
+    def test_accents_and_backgrounds_persist_and_match_preview_and_published_gifs(self):
         state = self.client.get("/api/state").json()
         self.assertEqual(state["widget_accents"], WIDGET_ACCENTS)
+        self.assertEqual(state["widget_backgrounds"], WIDGET_BACKGROUNDS)
         device = state["config"]["devices"][0]
         choices = ["electric-cyan", "solar-gold", "tangerine", "hot-pink", "ultraviolet"]
+        backgrounds = list(WIDGET_BACKGROUNDS)[1:6]
         kinds = ["clock", "text", "strava", "weather", "countdown"]
-        for screen, kind, accent in zip(device["screens"], kinds, choices):
+        for screen, kind, accent, background in zip(device["screens"], kinds, choices, backgrounds):
             screen.update(
-                kind=kind, accent=accent, latitude=0, longitude=0,
+                kind=kind, accent=accent, background=background, latitude=0, longitude=0,
                 target="2099-12-25T00:00",
             )
         stats = {"distance": 1250000, "count": 42, "moving_time": 180000}
@@ -610,6 +613,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         restored = Store(self.app.state.store.path).config().devices[0].screens
         self.assertEqual([screen.accent for screen in restored], choices)
+        self.assertEqual([screen.background for screen in restored], backgrounds)
         for panel, (kind, accent) in enumerate(zip(kinds, choices)):
             with self.subTest(kind=kind, accent=accent):
                 position = (6, 20 if kind == "strava" else 23)
@@ -618,9 +622,13 @@ class AppTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 with Image.open(io.BytesIO(response.content)) as preview:
                     self.assertEqual(preview.getpixel(position), expected)
+                    self.assertEqual(preview.getpixel((0, 0)),
+                                     tuple(bytes.fromhex(backgrounds[panel][1:])))
                 filename, _ = self.app.state.engine.content(device["id"], panel)
                 with Image.open(self.app.state.engine.directory / filename) as published:
                     self.assertEqual(published.convert("RGB").getpixel(position), expected)
+                    self.assertEqual(published.convert("RGB").getpixel((0, 0)),
+                                     tuple(bytes.fromhex(backgrounds[panel][1:])))
 
     def test_strava_example_preview_is_labelled_and_never_used_for_sends(self):
         state = self.client.get("/api/state").json()

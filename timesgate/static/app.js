@@ -141,16 +141,23 @@ function numberField(object, key, label, min, max, step = 1) {
   input.min = min; input.max = max; input.step = step;
   return labelNode;
 }
+function backgroundPicker(screen) {
+  screen.background ??= "#08121e";
+  const choices = {...state.widget_backgrounds};
+  const existing = !Object.hasOwn(choices, screen.background);
+  if (existing) choices[screen.background] = `Existing custom colour (${screen.background}; contrast not checked)`;
+  return node("div", {},
+    field(screen, "background", "Background colour", "select", choices),
+    hint("Palette colours meet 4.5:1 contrast against every widget accent and standard text colour. Custom layer colours and images need their own contrast checks."));
+}
 function designEditor(screen) {
   screen.elements ??= [];
-  screen.background ??= "#08121e";
   const metrics = {
     value: "Fixed value", cpu: "CPU %", ram: "RAM %", disk: "Disk %",
     gpu: "GPU %", cpu_temp: "CPU temperature (C)", gpu_temp: "GPU temperature (C)",
     download: "Download (bytes/s)", upload: "Upload (bytes/s)",
   };
   const editor = node("div", {class: "design-editor"},
-    field(screen, "background", "Canvas background", "color"),
     hint("128 × 128 canvas. Layers draw in list order; later layers cover earlier ones. Image layers use the first frame of uploaded media."),
     hint("Text fields: {time}, {date}, {cpu}, {ram}, {disk}, {gpu}, {cpu_temp}, {gpu_temp}, {download}, {upload}. Metrics describe the server; unavailable values show N/A."));
   screen.elements.forEach((layer, index) => {
@@ -665,6 +672,7 @@ function screensPage(main) {
     if (["clock", "text", "strava", "weather", "countdown", "rss"].includes(screen.kind)) {
       content.append(field(screen, "title", "Heading"), accentPicker(screen, `accent-${device.id}-${panel}`));
     }
+    if (!["media", "unmanaged"].includes(screen.kind)) content.append(backgroundPicker(screen));
     if (screen.kind === "text") content.append(field(screen, "text", "Text (up to six displayed lines)", "textarea"));
     if (screen.kind === "strava") {
       content.append(

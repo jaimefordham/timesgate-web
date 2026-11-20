@@ -29,6 +29,18 @@ Capacitor, mobile build chain, Redis or host cron is required.
   **Original** preserves the previous mint/orange styling and is the default for
   existing configurations. Choices persist on the server independently of the UI
   theme. Image/GIF content and custom-design layer colours are unchanged.
+- Per-widget **Background colour** dropdown in Screens: **Very dark navy**
+  (`#08121e`, the unchanged default), **Black**, **Charcoal**, **Slate**,
+  **Forest**, **Plum** and **Espresso**. Every palette background passes WCAG
+  AA's 4.5:1 text-contrast threshold against all eight accents, both Original
+  accents (mint and Strava orange), white values and neutral widget text.
+  The lowest measured contrast across the palette is 4.95:1. This checks source
+  colours, not physical LCD calibration, anti-aliased edges or JPEG artefacts.
+  Selections are independent per screen, persist with **Save configuration**,
+  and apply to previews, generated GIF/JPEG widgets and native clock backgrounds.
+  Uploaded media and unmanaged screens are unchanged. Existing custom canvas
+  colours outside the palette are preserved and labelled as contrast unchecked;
+  custom layer colours and image content require their own contrast checks.
 - Four selectable UI themes: **Graphite**, **Porcelain**, **Carbon** and **Paper**.
   Graphite/Carbon use grey-black dark palettes; Porcelain/Paper are light themes.
   Use the **Theme** selector on the sign-in page or page header. It applies

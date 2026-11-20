@@ -212,7 +212,7 @@ class Engine(threading.Thread):
                     raise ValueError("Set MEDIA_BASE_URL to an HTTP origin reachable by the device")
                 if native:
                     name = publish(self.directory, encode_full_frames(
-                        [Image.new("RGB", (128, 128), "#08121e")], [1000],
+                        [Image.new("RGB", (128, 128), screen.background)], [1000],
                     ))
                     self.store.remember_render(name)
                 else:

@@ -416,6 +416,30 @@ class HybridTransportTests(unittest.TestCase):
         self.assertEqual(self.post.call_count, 2)
         self.assertGreater(self.engine.screen_send_ready[self.device.host], 0)
 
+    def test_selected_background_reaches_jpeg_and_native_clock_transports(self):
+        self.device.widget_transport = "jpeg"
+        for background in ("#000000", "#0c2118"):
+            for renderer in ("image", "native"):
+                with self.subTest(background=background, renderer=renderer):
+                    self.device.clock_renderer = renderer
+                    self.device.screens[2].background = background
+                    self.save()
+                    self.post.reset_mock()
+                    self.assertEqual(self.send()["status"], "acknowledged")
+                    payload = self.post.call_args.kwargs["json"]
+                    if renderer == "native":
+                        filename = payload["BackgroudGif"].rsplit("/", 1)[1]
+                        source = self.root / filename
+                    else:
+                        source = io.BytesIO(base64.b64decode(payload["PicData"], validate=True))
+                    with Image.open(source) as image:
+                        actual = image.convert("RGB").getpixel((0, 127))
+                    expected = tuple(bytes.fromhex(background[1:]))
+                    tolerance = 0 if renderer == "native" else 3
+                    self.assertTrue(all(
+                        abs(left - right) <= tolerance for left, right in zip(actual, expected)
+                    ), (actual, expected))
+
     def test_jpeg_rejection_does_not_fall_back_to_url_playback(self):
         self.device.widget_transport = "jpeg"
         self.save()
