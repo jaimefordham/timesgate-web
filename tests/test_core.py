@@ -223,6 +223,68 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.jobs()[0]["status"], "acknowledged")
         self.assertEqual(self.store.jobs()[0]["id"], key)
 
+    def test_screen_send_spacing_starts_at_completion_even_after_timeout(self):
+        config = self.store.config()
+        device = config.devices[0]
+        device.host, device.local_token = "192.168.1.10", 123456
+        for panel in (1, 2):
+            device.screens[panel] = Screen(kind="clock", enabled=True)
+        self.store.save_config(config, self.store.revision(), now=1000)
+        self.store.schedule_due(1000)
+        self.store.enqueue("send", device.id, 2)
+        engine = Engine(self.store, self.root, "http://nas.lan:8081", Mock())
+        now = 100.0
+        starts = []
+
+        def wait(seconds):
+            nonlocal now
+            now += seconds
+            return False
+
+        def send(device, panel, url):
+            nonlocal now
+            starts.append(now)
+            now += 7
+            if len(starts) == 2:
+                raise DeviceError("Device command timeout; effect unknown")
+
+        with patch.object(engine, "content", return_value=("test.gif", True)), patch(
+            "timesgate.engine.time.monotonic", side_effect=lambda: now,
+        ), patch.object(engine.stopping, "wait", side_effect=wait) as pause, patch(
+            "timesgate.engine.play_gif", side_effect=send,
+        ) as play:
+            for _ in range(3):
+                engine.process(self.store.claim())
+        self.assertEqual(starts, [100.0, 109.0, 118.0])
+        self.assertEqual([call.args[0] for call in pause.call_args_list], [2.0, 2.0])
+        self.assertEqual([call.args[1] for call in play.call_args_list], [1, 2, 2])
+        self.assertEqual([job["status"] for job in reversed(self.store.jobs())],
+                         ["acknowledged", "error", "acknowledged"])
+
+    def test_screen_send_spacing_is_per_host_and_shutdown_cancels_waiting_send(self):
+        config = Configuration(devices=[
+            Device(host=f"192.168.1.{index}", local_token=123456,
+                   screens=[Screen(kind="clock"), Screen(), Screen(), Screen(), Screen()])
+            for index in (10, 11)
+        ])
+        self.store.save_config(config, self.store.revision())
+        first, second = config.devices
+        for device in (first, second, first):
+            self.store.enqueue("send", device.id, 0)
+        engine = Engine(self.store, self.root, "http://nas.lan:8081", Mock())
+        with patch.object(engine, "content", return_value=("test.gif", True)), patch(
+            "timesgate.engine.time.monotonic", return_value=100.0,
+        ), patch.object(engine.stopping, "wait", return_value=True) as pause, patch(
+            "timesgate.engine.play_gif",
+        ) as send:
+            for _ in range(3):
+                engine.process(self.store.claim())
+        self.assertEqual([call.args[0].host for call in send.call_args_list],
+                         [first.host, second.host])
+        pause.assert_called_once_with(2.0)
+        self.assertEqual(self.store.jobs()[0]["status"], "cancelled")
+        self.assertIn("stopping", self.store.jobs()[0]["message"])
+
 
 class ProtocolTests(unittest.TestCase):
     def test_hardware_routes_and_token_never_goes_to_media_host(self):
@@ -238,6 +300,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(data["LcdArray"], [0, 0, 0, 1, 0])
             self.assertEqual(data["LocalToken"], 123456)
             self.assertNotIn("123456", data["FileName"][0])
+            self.assertEqual(session.post.call_args.kwargs["timeout"], (5, 45))
 
     def test_rejections_do_not_retry_or_expose_credential_echoes(self):
         for body in ({}, {"ReturnCode": False}, {"ReturnCode": 0, "error_code": 1},

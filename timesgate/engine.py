@@ -31,6 +31,7 @@ class Engine(threading.Thread):
         self.stopping = threading.Event()
         self.last_cleanup = 0.0
         self.last_heartbeat = 0.0
+        self.screen_send_ready: dict[str, float] = {}
         self.sources = WidgetSources(demo=demo)
 
     def image(self, screen: Screen, timezone: str, *, preview: bool = False) -> Image.Image:
@@ -203,7 +204,14 @@ class Engine(threading.Thread):
                 self.store.finish(key, "demo", "Rendered in demo mode; no device command sent")
                 return
             base = http_base(self.media_base_url, http_only=True)
-            play_gif(device, job["panel"], base + "/" + name)
+            delay = self.screen_send_ready.get(device.host, 0.0) - time.monotonic()
+            if delay > 0 and self.stopping.wait(delay):
+                self.store.finish(key, "cancelled", "Controller stopping; screen send not attempted")
+                return
+            try:
+                play_gif(device, job["panel"], base + "/" + name)
+            finally:
+                self.screen_send_ready[device.host] = time.monotonic() + 2.0
             self.store.finish(key, "acknowledged",
                               "Playback command acknowledged; download/rendering not verified")
         except Exception as error:

@@ -195,6 +195,15 @@ network; then check the display itself. No software-only check proves rendering.
   reset its schedule.
 - The worker queues one latest update per overdue screen, not an outage backlog.
   Active writes on the same screen are not duplicated by scheduling.
+- Screen playback requests are sequential, with at least two seconds between
+  completion of one request and the next screen send to the same device IP,
+  including after failures. Manual and automatic sends share this spacing;
+  it does not change saved schedules or confirm that rendering has finished.
+  Other device IPs have independent spacing, though the single worker may still
+  delay their jobs while waiting. Demo sends do not wait.
+- Device API requests use a five-second connection timeout and a 45-second read
+  timeout. These are connection/read inactivity limits, not a total deadline.
+  An explicit device-returned `command timeout` is still reported as an error.
 - Failed automatic writes remain errors. The next normal scheduled update can
   send the latest content; there are no immediate command retries.
 - Pending/running jobs at restart become **interrupted**, with unknown device

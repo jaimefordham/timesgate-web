@@ -39,7 +39,7 @@ def device_command(device: Device, payload: dict, session=requests) -> dict:
     if device.hardware == 402:
         payload["ReturnCode"] = 0
     try:
-        response = session.post(endpoint, json=payload, timeout=(5, 15), allow_redirects=False)
+        response = session.post(endpoint, json=payload, timeout=(5, 45), allow_redirects=False)
     except requests.RequestException:
         raise DeviceError("Device connection failed or timed out; effect unknown. No retry made.") from None
     if not 200 <= response.status_code < 300:
