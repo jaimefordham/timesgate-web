@@ -6,7 +6,6 @@ const pendingControls = new Set();
 const activityDetails = new Set();
 const objectUrls = [];
 const lightingDrafts = new Map();
-const displayDrafts = new Map();
 const controlDrafts = new Map();
 const themes = {graphite: "Graphite", porcelain: "Porcelain", carbon: "Carbon", paper: "Paper"};
 const widgetNames = {
@@ -64,9 +63,16 @@ async function request(path, method = "GET", data, binary = false) {
 }
 function mark() {
   dirty = true;
-  const status = document.querySelector("#save-state");
-  if (status) status.textContent = "Unsaved changes";
+  updateUnsavedConfiguration();
   updateScreenDrafts();
+}
+function updateUnsavedConfiguration() {
+  const status = document.querySelector("#save-state");
+  if (status) status.textContent = dirty ? "Unsaved changes"
+    : page === "Lighting" ? "Preview locally, then Apply lighting" : "Saved configuration";
+  const warning = document.querySelector("#unsaved-configuration");
+  if (warning) warning.hidden = !dirty;
+  fitDeviceStatusPanel();
 }
 function field(object, key, label, type = "text", options = null, changed = mark) {
   const control = type === "select" ? node("select")
@@ -191,7 +197,6 @@ async function save() {
 function login(setup = false) {
   state = null; config = null; revision = null; dirty = false;
   lightingDrafts.clear();
-  displayDrafts.clear();
   controlDrafts.clear();
   objectUrls.splice(0).forEach(url => URL.revokeObjectURL(url));
   const username = node("input", {
@@ -276,6 +281,7 @@ function render() {
         plugins, ...["Activity", "Settings"].map(navButton)),
       hint("Schedules run in the container, even when this browser is closed.")),
     node("div", {class: "workspace"},
+      node("div", {class: "global-status-shell"},
       node("section", {class: "global-device-bar", "aria-label": "Global device status"},
         node("span", {class: "global-device-label"}, "Device status"),
         node("div", {id: "global-device-summary"}),
@@ -290,6 +296,12 @@ function render() {
             node("div", {class: "device-status-footer"},
               node("span", {id: "device-status-freshness", role: "status"}),
               button("View Activity", () => { page = "Activity"; render(); }))))),
+      node("section", {id: "unsaved-configuration", class: "unsaved-configuration",
+        "aria-label": "Unsaved configuration"},
+        node("div", {role: "status"},
+          node("strong", {}, "Unsaved configuration"),
+          node("span", {}, "Your configuration edits are not saved. Save configuration to persist them.")),
+        button("Save configuration", async () => { await save(); notify("Configuration saved"); }, true))),
       main)));
   [...root.querySelectorAll("nav button")].find(item => item.textContent === page)?.classList.add("active");
   main.append(node("header", {},
@@ -298,7 +310,6 @@ function render() {
     row(themePicker(), button("Reload", async () => {
       if ((dirty || page === "Lighting" || page === "Tools") && !confirm("Discard unsaved changes?")) return;
       lightingDrafts.clear();
-      displayDrafts.clear();
       controlDrafts.clear();
       await load(); render();
     }), page === "Lighting" ? null
@@ -315,6 +326,7 @@ function render() {
   if (page === "Activity") activityPage(main);
   if (page === "Settings") settingsPage(main);
   updateGlobalDeviceStatus();
+  updateUnsavedConfiguration();
 }
 function deviceSelector(devices, label = "Device") {
   const selector = node("select", {"aria-label": label});
@@ -363,8 +375,8 @@ function updateGlobalDeviceStatus() {
   count.classList.toggle("status-warning", alerts > 0);
   const selector = deviceSelector(state.config.devices, "Status device");
   selector.value = active.id;
-  const chip = (label, value, warning = false) => node("span", {
-    class: warning ? "status-warning" : "",
+  const chip = (label, value, warning = false, className = "") => node("span", {
+    class: warning ? "status-warning" : className,
   }, label, node("strong", {}, value));
   const night = active.night.enabled
     ? `${active.night.start} - ${active.night.end}` : "Off";
@@ -379,7 +391,7 @@ function updateGlobalDeviceStatus() {
         : !active.configured ? chip("", "Connection not configured", true)
         : [
           chip("Sleep guard ", active.sleeping ? "Active" : "Off", active.sleeping),
-          chip("", active.paused ? "Paused" : "Not paused", active.paused),
+          chip("", active.paused ? "Paused" : "Running", active.paused, "status-running"),
         ],
       node("span", {class: "global-device-night", title: `Saved night schedule in ${active.timezone}`},
         "Night ", node("strong", {}, night))));
@@ -518,18 +530,19 @@ function updateDeviceStatus() {
 function deviceBar(device) {
   const saved = state.config.devices.find(item => item.id === device.id);
   const configured = saved?.host && (saved.hardware !== 402 || saved.local_token_set);
-  if (!displayDrafts.has(device.id)) displayDrafts.set(device.id, {
-    brightness: state.controls[device.id]?.brightness ?? 70,
-  });
-  const draft = displayDrafts.get(device.id);
-  const output = node("output", {}, `${draft.brightness}%`);
+  const night = device.night;
+  const output = node("output", {}, `${night.day_brightness}%`);
   const slider = node("input", {
-    type: "range", min: "0", max: "100", step: "1", value: draft.brightness,
+    type: "range", min: "0", max: "100", step: "1", value: night.day_brightness,
     "aria-label": "LCD brightness draft",
-    oninput: event => { draft.brightness = Number(event.target.value); output.textContent = `${draft.brightness}%`; },
+    oninput: event => {
+      night.day_brightness = Number(event.target.value);
+      output.textContent = `${night.day_brightness}%`;
+      mark();
+    },
   });
   const actions = [
-    button("Apply LCD brightness", () => sendControl(device, {action: "brightness", value: draft.brightness})),
+    button("Apply LCD brightness", () => sendControl(device, {action: "brightness", value: night.day_brightness})),
     button("Sleep displays", () => sendControl(device, {action: "power", on: false})),
     button("Wake displays", () => sendControl(device, {action: "power", on: true})),
     button("Restore layout / resume", () => sendControl(device, {action: "resume"})),
@@ -540,6 +553,7 @@ function deviceBar(device) {
     node("h2", {}, `${device.name} / Device controls`),
     hint("Experimental firmware controls; physical hardware 402 behaviour is unverified. Uses the saved connection."),
     node("label", {}, node("span", {}, "LCD brightness draft (not RGB)"), row(slider, output)),
+    hint("Linked to Day LCD brightness. Apply sends it now; Save configuration persists it for the day schedule."),
     row(...actions),
     node("div", {"data-control-status": device.id}));
 }
@@ -769,8 +783,8 @@ function devicesPage(main) {
   }));
 }
 function toolsPage(main) {
-  const selector = deviceSelector(state.config.devices, "Tools device");
-  const device = state.config.devices.find(item => item.id === selector.value);
+  const selector = deviceSelector(config.devices, "Tools device");
+  const device = config.devices.find(item => item.id === selector.value);
   if (!state.controls[device.id]) {
     main.append(hint("The device configuration changed. Reload before using tools."));
     return;
@@ -820,7 +834,8 @@ function toolsPage(main) {
       node("div", {"data-diagnostic": device.id}),
       button("Reboot device", () => control({action: "reboot"})),
       hint("Reboot requires confirmation and pauses screen updates. Wait for the device to return, then Restore layout. Device reboot does not trigger app-start RGB restoration.")));
-  if (!device.host || (device.hardware === 402 && !device.local_token_set)) {
+  const saved = state.config.devices.find(item => item.id === device.id);
+  if (!saved?.host || (saved.hardware === 402 && !saved.local_token_set)) {
     for (const control of main.querySelectorAll(".grid button, .advanced-controls button")) control.disabled = true;
   }
   updateDeviceStatus();

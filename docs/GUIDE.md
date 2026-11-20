@@ -229,11 +229,25 @@ These use the saved connection, never unsaved drafts. **Activity** opens the
 retained job details. The existing three-second refresh updates the bar and panel;
 failed refreshes mark it stale and disable its recovery actions until refreshed.
 These are controller states, not proof that the physical device is awake or online.
+The green **Running** label means the controller is not paused; the sleep guard
+is shown separately and can still block screen sends.
+A persistent amber **Unsaved configuration** warning appears beneath the global
+bar when configuration is edited. It remains visible across all sections and
+while scrolling, including Lighting, until configuration is saved or drafts are
+discarded with Reload. Its **Save configuration** button persists those edits.
+Lighting previews and native-tool drafts still use their separate Apply actions;
+they are not persisted by Save configuration.
 
 The device command bar on **Screens** and **Tools** has an LCD brightness draft,
 **Apply LCD brightness**, **Sleep displays**, **Wake displays**, **Restore layout /
 resume**, and a shortcut to RGB lighting. LCD brightness is independent of RGB
-brightness. The five-screen overview selects one editor at a time; accent
+brightness. The LCD brightness draft and **Day LCD brightness** share the same
+value: editing either updates the other without sending a command.
+**Apply LCD brightness** sends that value immediately; **Save configuration**
+persists it for the scheduled day boundary without applying it immediately.
+The draft starts from saved day brightness, not the last acknowledged device
+brightness, so scheduled night dimming does not overwrite the day setting.
+The five-screen overview selects one editor at a time; accent
 borders, automatic-run RAG badges and saved/draft labels distinguish configuration,
 last results and previews. These are **not live photographs or device readbacks**.
 
