@@ -261,9 +261,11 @@ levels, and **Save configuration**. It uses the application's IANA timezone,
 not the NAS/container timezone. Activation waits for the next selected boundary;
 saving does not immediately change the displays.
 
-The day boundary restores day LCD brightness and, in sleep mode, wakes the
-displays. RGB lighting is unchanged. Overnight and same-day windows are both
-supported; start and end cannot be equal. DST follows the daily-screen scheduling
+The day boundary restores day LCD brightness and, in sleep mode, first wakes the
+displays so a brightness failure cannot prevent the wake command. An acknowledged
+wake clears the sleep guard even if restoring brightness then fails; the failure
+remains visible in Activity. RGB lighting is unchanged. Overnight and same-day
+windows are both supported; start and end cannot be equal. DST follows the daily-screen scheduling
 rules above, with windows compared as absolute instants through the repeated
 hour. If spring-forward normalization moves a same-day start beyond its end,
 that empty window is skipped rather than sleeping until the next day.
@@ -297,9 +299,10 @@ startup-restoration approval: only **Apply lighting** sends the preview.
 Draft/matches-last-acknowledgement and restoration enabled/off/hold labels are
 shown separately.
 
-The five-screen preview uses saved screen content and an illustrative glow.
-It is **not live device feedback**, a simulation of the actual animation, or
-a guarantee of secondary-zone colour. Unmanaged screens are placeholders;
+The five-screen preview uses saved screen content and illustrates the curved
+left/right edge strips separately from the glow behind the device. It is
+**not live device feedback**, a simulation of the actual animation, or a
+guarantee of secondary-zone colour. Unmanaged screens are placeholders;
 unavailable widget previews show their error instead of a fabricated image.
 Only clicking **Apply lighting** queues a device command. Moving sliders,
 choosing effects/presets or resetting the preview never sends lighting commands.

@@ -96,7 +96,8 @@ def night_commands(settings: NightMode, phase: str) -> list[dict]:
     if settings.mode == "sleep" and phase == "start":
         return [{"Command": "Channel/OnOffScreen", "OnOff": 0}]
     brightness = settings.brightness if phase == "start" else settings.day_brightness
-    commands = [{"Command": "Channel/SetBrightness", "Brightness": brightness}]
+    commands: list[dict] = []
     if settings.mode == "sleep":
         commands.append({"Command": "Channel/OnOffScreen", "OnOff": 1})
+    commands.append({"Command": "Channel/SetBrightness", "Brightness": brightness})
     return commands

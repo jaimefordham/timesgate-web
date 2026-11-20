@@ -605,7 +605,7 @@ function devicesPage(main) {
       field(night, "enabled", "Enable night schedule", "checkbox", null, () => { mark(); update(); }),
       hint(`Uses ${config.timezone}. Save configuration to activate at the next boundary; no immediate command is sent.`),
       times, mode, brightness,
-      hint("Sleep keeps RGB separate and blocks screen pushes. The day boundary sets day brightness and wakes displays in sleep mode. Dim mode never wakes manually sleeping displays. Missed boundaries coalesce to the current period; failed commands wait for the next daily boundary."),
+      hint("Sleep keeps RGB separate and blocks screen pushes. In sleep mode, the day boundary wakes displays before setting day brightness. Dim mode never wakes manually sleeping displays. Missed boundaries coalesce to the current period; failed commands wait for the next daily boundary."),
       button("Open device controls", () => { selected = device.id; page = "Tools"; render(); })));
     update();
   });
@@ -727,6 +727,8 @@ function lightingPage(main) {
   main.append(row(selector), hint(`Uses the saved connection: ${device.host || "not configured"}. Save connection changes in Devices first. Lighting does not change screen content or schedules.`));
 
   const back = node("div", {class: "lighting-glow", "aria-hidden": "true"});
+  const edgeLeft = node("div", {class: "lighting-edge lighting-edge-left", "aria-hidden": "true"});
+  const edgeRight = node("div", {class: "lighting-edge lighting-edge-right", "aria-hidden": "true"});
   const panels = node("div", {class: "lighting-panels"});
   const images = [];
   device.screens.forEach((screen, panel) => {
@@ -737,20 +739,22 @@ function lightingPage(main) {
       node("span", {class: "lighting-screen-label"}, String(panel + 1))));
     if (image) images.push([image, panel]);
   });
+  const front = node("div", {class: "lighting-front"},
+    edgeLeft, panels, edgeRight);
   const keys = node("div", {class: "lighting-keys", "aria-hidden": "true"});
-  const preview = node("div", {class: "lighting-device", "aria-label": "Illustrative five-screen lighting preview"},
-    back, panels, keys);
+  const preview = node("div", {
+    class: "lighting-device",
+    "aria-label": "Illustrative five-screen lighting preview with left and right edge lights and rear backlight",
+  }, back, front, keys);
   const percentage = node("output", {"aria-live": "polite"}, `${settings.brightness}%`);
   const colourValue = node("span", {class: "muted"}, settings.color.toUpperCase());
   const draw = () => {
     const intensity = settings.on ? settings.brightness / 100 : 0;
     back.style.backgroundColor = settings.color;
     back.style.opacity = settings.zone === 1 ? "0" : String(intensity * 0.6);
-    for (const panel of panels.children) {
-      panel.style.borderColor = settings.on && settings.zone !== 2 && intensity > 0
-        ? `${settings.color}${Math.round(255 * intensity).toString(16).padStart(2, "0")}` : "#343434";
-      panel.style.boxShadow = settings.zone !== 2 && intensity > 0
-        ? `0 0 ${Math.round(20 * intensity)}px ${settings.color}` : "none";
+    for (const edge of [edgeLeft, edgeRight]) {
+      edge.style.setProperty("--edge-color", settings.color);
+      edge.style.opacity = settings.zone !== 2 ? String(intensity) : "0";
     }
     keys.style.backgroundColor = settings.color;
     keys.style.opacity = settings.keys ? String(intensity) : "0";
@@ -771,7 +775,7 @@ function lightingPage(main) {
     zones.append(control);
   });
   main.append(card("Lighting preview", preview,
-    hint("Illustrative preview—not live device feedback. Images use saved screen settings. Glow, colour and zone are approximate; animations and secondary-zone behaviour must be checked on the Times Gate."),
+    hint("Illustrative preview—not live device feedback. Edges are the curved left/right light strips; Backlight is the glow behind the device. Images use saved screen settings. Colours and intensity are approximate; animations and secondary-zone behaviour must be checked on the Times Gate."),
     row(colour, colourValue), zones,
     node("label", {}, node("span", {}, "Brightness (global)"), row(brightness, percentage)),
     row(

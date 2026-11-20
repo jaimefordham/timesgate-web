@@ -212,8 +212,8 @@ class ControlTests(unittest.TestCase):
         ) as send:
             self.engine.process(self.store.claim())
         self.assertEqual([call.args[1] for call in send.call_args_list], [
-            {"Command": "Channel/SetBrightness", "Brightness": 70},
             {"Command": "Channel/OnOffScreen", "OnOff": 1},
+            {"Command": "Channel/SetBrightness", "Brightness": 70},
         ])
         self.assertFalse(self.store.control_state(self.device)["sleeping"])
         self.store.schedule_due(morning + 86400)
@@ -227,6 +227,70 @@ class ControlTests(unittest.TestCase):
             self.store.finish(self.store.enqueue("strava"), "done", str(index))
         self.assertEqual(self.store.device_schedules()[0]["last_run"]["status"], "acknowledged")
         self.assertEqual(self.store.device_schedules()[1]["last_run"]["status"], "interrupted")
+
+    def test_scheduled_wake_handles_device_rejecting_brightness_while_asleep(self):
+        start = datetime(2026, 11, 18, 20, tzinfo=ZoneInfo("UTC")).timestamp()
+        night = start + 3 * 3600
+        morning = start + 12 * 3600
+        config = self.store.config()
+        config.devices[0].night = NightMode(enabled=True, mode="sleep")
+        config.devices[0].screens[0].enabled = True
+        self.store.save_config(config, self.store.revision(), now=start)
+        self.store.update_controls(self.device, sleeping=True)
+        self.store.schedule_due(night)
+        asleep = True
+
+        def send_command(device, command):
+            nonlocal asleep
+            if command["Command"] == "Channel/OnOffScreen":
+                asleep = command["OnOff"] == 0
+            elif command["Command"] == "Channel/SetBrightness" and asleep:
+                raise DeviceError("command timeout while asleep")
+            return {}
+
+        with patch("timesgate.engine.device_command", side_effect=send_command), patch(
+            "timesgate.engine.time.time", return_value=night,
+        ):
+            self.engine.process(self.store.claim())
+        self.assertTrue(asleep)
+        self.store.schedule_due(morning)
+        with patch("timesgate.engine.device_command", side_effect=send_command), patch(
+            "timesgate.engine.time.time", return_value=morning,
+        ):
+            self.engine.process(self.store.claim())
+        self.assertFalse(asleep)
+        self.assertFalse(self.store.control_state(self.device)["sleeping"])
+        self.assertEqual(self.store.control_state(self.device)["brightness"], 70)
+        self.assertEqual(self.store.device_schedules()[1]["last_run"]["status"], "acknowledged")
+        self.store.schedule_due(morning + 1)
+        self.assertEqual(self.store.claim()["operation"], "send")
+
+    def test_scheduled_wake_failure_preserves_guard_without_retry(self):
+        start = datetime(2026, 11, 18, 20, tzinfo=ZoneInfo("UTC")).timestamp()
+        config = self.store.config()
+        config.devices[0].night = NightMode(enabled=True, mode="sleep")
+        self.store.save_config(config, self.store.revision(), now=start)
+        for index, failed_command in enumerate(("Channel/OnOffScreen", "Channel/SetBrightness")):
+            with self.subTest(failed_command=failed_command):
+                morning = start + (12 + 24 * index) * 3600
+                self.store.update_controls(self.device, sleeping=True)
+                self.store.schedule_due(morning)
+
+                def send_command(device, command):
+                    if command["Command"] == failed_command:
+                        raise DeviceError("command timeout")
+                    return {}
+
+                with patch("timesgate.engine.time.time", return_value=morning), patch(
+                    "timesgate.engine.device_command", side_effect=send_command,
+                ) as send:
+                    self.engine.process(self.store.claim())
+                wake_failed = failed_command == "Channel/OnOffScreen"
+                self.assertEqual(send.call_count, 1 if wake_failed else 2)
+                self.assertEqual(self.store.control_state(self.device)["sleeping"], wake_failed)
+                self.assertEqual(self.store.device_schedules()[1]["last_run"]["status"], "error")
+                self.store.schedule_due(morning + 1)
+                self.assertIsNone(self.store.claim())
 
     def test_night_dst_windows_changed_schedules_and_manual_override(self):
         settings = NightMode(enabled=True, start="22:00", end="07:00")
