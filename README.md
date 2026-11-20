@@ -106,5 +106,8 @@ device write.
 The [detailed guide](docs/GUIDE.md) covers setup, login and account recovery,
 scheduling, widgets, Strava, privacy, development and validation limitations.
 
+Published GitHub releases automatically include commit titles and message bodies
+since the previous published release, preserving manually written release notes.
+
 Container builds, OMV/ARM64 deployment and end-to-end NAS/device/Strava OAuth
 verification still need validation on the deployment host.
