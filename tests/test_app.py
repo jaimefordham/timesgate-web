@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -34,6 +35,13 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/state", headers={"Origin": "http://untrusted.invalid"}).status_code, 403)
         self.assertEqual(self.client.get("/media/file.gif").status_code, 404)
         self.assertTrue(self.client.get("/healthz").json()["ok"])
+
+    def test_running_version_reports_release_tag_or_explicit_development_build(self):
+        with patch.dict(os.environ, {"APP_VERSION": "v1.2.3-rc.1"}):
+            self.assertEqual(self.client.get("/api/state").json()["version"], "v1.2.3-rc.1")
+        with patch.dict(os.environ):
+            os.environ.pop("APP_VERSION", None)
+            self.assertEqual(self.client.get("/api/state").json()["version"], "development")
 
     def test_device_transport_options_round_trip_without_sending_and_reject_invalid_values(self):
         state = self.client.get("/api/state").json()

@@ -189,7 +189,8 @@ def create_app(data_dir: Path | None = None, media_dir: Path | None = None, *,
                 "active_profiles": store.active_profiles(),
                 "lighting_defaults": LightingSettings().model_dump(),
                 "lighting_effects": {"edges": EDGE_EFFECTS, "back": BACK_EFFECTS},
-                "media_base_url": media_base, "version": "0.1.0"}
+                "media_base_url": media_base,
+                "version": os.environ.get("APP_VERSION", "development")}
 
     @app.put("/api/config")
     async def save_config(request: Request):

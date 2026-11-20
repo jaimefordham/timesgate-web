@@ -75,6 +75,19 @@ trigger the workflow. Use a release tag such as `v0.1.1` to publish both
 Stable releases also update both `latest` tags; prereleases do not.
 Wait for the workflow to succeed before pulling the images on OMV.
 
+Release application images embed the exact GitHub release tag (including `v`)
+as `APP_VERSION`. The running application displays it beneath the sidebar
+branding and in **Settings / Deployment**. This identifies the installed release,
+not the newest release available on GitHub. No extra OMV environment setting is
+needed; do not override `APP_VERSION` in Compose.
+
+Local/source builds display **development** unless explicitly built with
+`docker build --build-arg APP_VERSION=your-version -t timesgate-web:local .`.
+Existing images cannot acquire this information retroactively: publish a new
+release containing these changes, pull that image, and recreate the application
+container. Restarting an old container or rerunning a release tagged before these
+changes will not add the version display.
+
 ## Start with Docker Compose
 
 For **OpenMediaVault 8 / ARM64**, use the detailed

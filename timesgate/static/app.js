@@ -307,6 +307,7 @@ function render() {
   plugins.open = root.querySelector("nav .plugins")?.open ?? false;
   root.replaceChildren(node("div", {class: "layout"},
     node("aside", {}, node("div", {class: "brand"}, "TIMESGATE / WEB"),
+      hint(`Version ${state.version}`),
       node("div", {class: "tag"}, state.demo ? "DEMO · NO DEVICE WRITES" : "SINGLE-OWNER CONTROLLER"),
       node("nav", {"aria-label": "Sections"}, ...["Screens", "Lighting", "Profiles", "Tools", "Media", "Devices"].map(navButton),
         plugins, ...["Activity", "Settings"].map(navButton)),
@@ -1426,7 +1427,8 @@ function settingsPage(main) {
   main.append(card("Scheduling", field(config, "timezone", "IANA timezone (for clocks and daily schedules)"),
     hint("One background worker owns device I/O. Schedules survive restarts. On recovery, one latest update is queued per overdue screen; old manual jobs are marked interrupted, not replayed."),
     hint("Failed automatic pushes are reported and tried again only at the next scheduled interval. Generated media is retained for 24 hours; uploaded media persists.")),
-    card("Deployment", hint(`Device media origin: ${state.media_base_url || "Not configured"}`),
+    card("Deployment", hint(`Running version: ${state.version}`),
+      hint(`Device media origin: ${state.media_base_url || "Not configured"}`),
       hint("Keep the media port reachable by the device over HTTP without redirects. Restrict administration to your LAN or an authenticated HTTPS reverse proxy."),
       hint("Settings and tokens are stored unencrypted in the private SQLite data directory. Back up the data and media directories together while the services are stopped."),
       button("Sign out", async () => {

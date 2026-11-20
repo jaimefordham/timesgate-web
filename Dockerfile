@@ -12,6 +12,8 @@ RUN apt-get update \
 COPY pyproject.toml ./
 COPY timesgate ./timesgate
 RUN pip install --no-cache-dir .
+ARG APP_VERSION=development
+ENV APP_VERSION=${APP_VERSION}
 USER 10001:10001
 ENV DATA_DIR=/data MEDIA_DIR=/media
 EXPOSE 8080
