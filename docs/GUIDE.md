@@ -215,13 +215,18 @@ network; then check the display itself. No software-only check proves rendering.
 
 ### LCD controls and native tools (experimental)
 
-A compact **Device status** strip appears below the heading on every signed-in
-page, with a row for each saved device. It shows the configured automatic screen
-schedule count, sleep guard, controller pause and night schedule independently.
-Amber highlights held screen sends. **Wake displays** appears for an active
+A compact **Device status** bar sits above the page heading on every signed-in
+page and stays visible while scrolling. Its device selector follows the selected
+device across sections; the desktop summary shows automatic screen schedules,
+sleep guard and controller pause. **All devices** opens the full status panel,
+including night schedules. An amber alert count highlights devices that are
+sleep-guarded, paused, unconfigured or have unavailable/stale status, even when
+another device is selected. Narrow screens retain the selector and alert count;
+the full details remain in the panel. Click outside it or press Escape to close.
+**Wake displays** appears for an active
 sleep guard; **Restore / resume** appears when paused without that guard.
 These use the saved connection, never unsaved drafts. **Activity** opens the
-retained job details. The existing three-second refresh updates this strip;
+retained job details. The existing three-second refresh updates the bar and panel;
 failed refreshes mark it stale and disable its recovery actions until refreshed.
 These are controller states, not proof that the physical device is awake or online.
 

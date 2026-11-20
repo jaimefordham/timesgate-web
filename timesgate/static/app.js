@@ -275,7 +275,22 @@ function render() {
       node("nav", {"aria-label": "Sections"}, ...["Screens", "Lighting", "Tools", "Media", "Devices"].map(navButton),
         plugins, ...["Activity", "Settings"].map(navButton)),
       hint("Schedules run in the container, even when this browser is closed.")),
-    main));
+    node("div", {class: "workspace"},
+      node("section", {class: "global-device-bar", "aria-label": "Global device status"},
+        node("span", {class: "global-device-label"}, "Device status"),
+        node("div", {id: "global-device-summary"}),
+        node("details", {class: "global-device-disclosure", ontoggle: fitDeviceStatusPanel},
+          node("summary", {}, "All devices",
+            node("span", {id: "global-device-count", class: "pill"}),
+            node("span", {"aria-hidden": "true"}, "\u25be")),
+          node("section", {class: "device-status-panel", "aria-label": "All device status"},
+            node("div", {class: "device-status-heading"},
+              node("h2", {}, "All devices")),
+            node("div", {id: "global-device-status"}),
+            node("div", {class: "device-status-footer"},
+              node("span", {id: "device-status-freshness", role: "status"}),
+              button("View Activity", () => { page = "Activity"; render(); }))))),
+      main)));
   [...root.querySelectorAll("nav button")].find(item => item.textContent === page)?.classList.add("active");
   main.append(node("header", {},
     node("div", {}, node("h1", {}, page), node("span", {id: "save-state", class: "muted"},
@@ -288,11 +303,6 @@ function render() {
       await load(); render();
     }), page === "Lighting" ? null
       : button("Save configuration", async () => { await save(); notify("Configuration saved"); }, true))));
-  main.append(node("section", {class: "device-status-strip", "aria-label": "Global device status"},
-    node("div", {class: "device-status-heading"},
-      node("h2", {}, "Device status"),
-      node("span", {id: "device-status-freshness", role: "status"})),
-    node("div", {id: "global-device-status"})));
   if (state.demo) main.append(node("div", {class: "banner"}, "Demo mode uses sample weather, news and metrics; it never contacts Times Gate, Strava or widget sources."));
   if (!state.media_base_url && page !== "Lighting") main.append(node("div", {class: "banner warning"},
     "Set MEDIA_BASE_URL before live sends. It must be an HTTP address reachable from the Times Gate."));
@@ -340,9 +350,39 @@ function updateGlobalDeviceStatus() {
         && ["pending", "running"].includes(job.status)),
     };
   });
-  const signature = JSON.stringify([statusStale, summary]);
+  const active = summary.find(item => item.id === selected) || summary[0];
+  const signature = JSON.stringify([statusStale, active.id, summary]);
   if (target.dataset.status === signature) return;
   target.dataset.status = signature;
+  const needsAttention = item => statusStale || !item.available || !item.configured
+    || item.sleeping || item.paused;
+  const alerts = summary.filter(needsAttention).length;
+  const count = document.querySelector("#global-device-count");
+  count.textContent = alerts ? `${alerts} alert${alerts === 1 ? "" : "s"}`
+    : `${summary.length} device${summary.length === 1 ? "" : "s"}`;
+  count.classList.toggle("status-warning", alerts > 0);
+  const selector = deviceSelector(state.config.devices, "Status device");
+  selector.value = active.id;
+  const chip = (label, value, warning = false) => node("span", {
+    class: warning ? "status-warning" : "",
+  }, label, node("strong", {}, value));
+  const night = active.night.enabled
+    ? `${active.night.start} - ${active.night.end}` : "Off";
+  document.querySelector("#global-device-summary").replaceChildren(
+    node("div", {class: "global-device-selection"},
+      node("span", {class: `global-device-dot${needsAttention(active) ? " status-warning" : ""}`,
+        "aria-hidden": "true"}), selector),
+    node("div", {class: "global-device-chips"},
+      chip("", `${active.pushes} automatic`),
+      statusStale ? chip("", "Status stale", true)
+        : !active.available ? chip("", "Status unavailable", true)
+        : !active.configured ? chip("", "Connection not configured", true)
+        : [
+          chip("Sleep guard ", active.sleeping ? "Active" : "Off", active.sleeping),
+          chip("", active.paused ? "Paused" : "Not paused", active.paused),
+        ],
+      node("span", {class: "global-device-night", title: `Saved night schedule in ${active.timezone}`},
+        "Night ", node("strong", {}, night))));
   const freshness = document.querySelector("#device-status-freshness");
   freshness.textContent = statusStale ? "Status stale / refresh failed"
     : state.demo ? "Demo / local state only" : "Controller state / not live device feedback";
@@ -375,7 +415,7 @@ function updateGlobalDeviceStatus() {
     const night = item.night.enabled
       ? `${item.night.mode === "sleep" ? "Sleep" : "Dim"} ${item.night.start} - ${item.night.end}` : "Off";
     return node("article", {
-      class: `device-status-row${blocked || uncertain ? " device-status-attention" : ""}`,
+      class: `device-status-row${needsAttention(item) ? " device-status-attention" : ""}`,
       "aria-label": `${item.name} controller status`,
     },
     node("div", {class: "device-status-identity"},
@@ -390,6 +430,26 @@ function updateGlobalDeviceStatus() {
     actions);
   }));
 }
+function fitDeviceStatusPanel() {
+  const disclosure = document.querySelector(".global-device-disclosure");
+  if (!disclosure?.open) return;
+  const panel = disclosure.querySelector(".device-status-panel");
+  const available = window.innerHeight - panel.getBoundingClientRect().top - 16;
+  panel.style.maxHeight = `${Math.max(0, available)}px`;
+}
+window.addEventListener("resize", fitDeviceStatusPanel);
+window.addEventListener("scroll", fitDeviceStatusPanel, {passive: true});
+document.addEventListener("click", event => {
+  const disclosure = document.querySelector(".global-device-disclosure");
+  if (disclosure?.open && !disclosure.contains(event.target)) disclosure.open = false;
+}, {capture: true});
+document.addEventListener("keydown", event => {
+  const disclosure = document.querySelector(".global-device-disclosure");
+  if (event.key === "Escape" && disclosure?.open) {
+    disclosure.open = false;
+    disclosure.querySelector("summary").focus();
+  }
+});
 async function sendControl(device, control) {
   const runtime = state.controls[device.id];
   const takeover = ["timer", "stopwatch", "scoreboard", "noise"].includes(control.action);
