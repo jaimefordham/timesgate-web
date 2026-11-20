@@ -154,6 +154,8 @@ class Device(Model):
     name: str = Field(default="Times Gate", min_length=1, max_length=60)
     host: str = ""
     hardware: Literal[400, 402] = 402
+    widget_transport: Literal["gif", "jpeg"] = "gif"
+    clock_renderer: Literal["image", "native"] = "image"
     local_token: StrictInt | None = Field(default=None, ge=1, le=2147483647)
     local_token_set: bool = Field(default=False, exclude=True)
     night: NightMode = Field(default_factory=NightMode)

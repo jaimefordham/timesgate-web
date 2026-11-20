@@ -15,6 +15,13 @@ const widgetNames = {
   weather: "Weather", countdown: "Countdown", rss: "RSS / Atom news", custom: "Custom design",
 };
 
+function screenTransport(device, screen) {
+  if (screen.kind === "unmanaged") return "unmanaged";
+  if (screen.kind === "media") return "gif";
+  if (screen.kind === "clock" && device.clock_renderer === "native") return "native";
+  return device.widget_transport || "gif";
+}
+
 function node(tag, attrs = {}, ...children) {
   const result = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -340,7 +347,7 @@ function render() {
       : button("Save configuration", async () => { await save(); notify("Configuration and loaded profiles saved. Lighting was not sent."); }, true))));
   if (state.demo) main.append(node("div", {class: "banner"}, "Demo mode uses sample weather, news and metrics; it never contacts Times Gate, Strava or widget sources."));
   if (!state.media_base_url && page !== "Lighting") main.append(node("div", {class: "banner warning"},
-    "Set MEDIA_BASE_URL before live sends. It must be an HTTP address reachable from the Times Gate."));
+    "Set MEDIA_BASE_URL for GIF playback and native clock backgrounds. It must be reachable from the Times Gate. Direct JPEG widget uploads do not require it."));
   if (page === "Screens") screensPage(main);
   if (page === "Lighting") lightingPage(main);
   if (page === "Profiles") profilesPage(main);
@@ -590,6 +597,7 @@ function updateScreenDrafts() {
     const device = current();
     const saved = state.config.devices.find(item => item.id === device.id);
     const changed = config.timezone !== state.config.timezone
+      || screenTransport(device, device.screens[panel]) !== screenTransport(saved || {}, device.screens[panel])
       || JSON.stringify(device.screens[panel]) !== JSON.stringify(saved?.screens[panel]);
     label.textContent = changed ? "Preview changed / save to refresh" : "Saved preview / not live";
   }
@@ -684,6 +692,12 @@ function screensPage(main) {
     }
     if (screen.kind === "custom") content.append(designEditor(screen));
     if (screen.kind !== "unmanaged") {
+      const native = screenTransport(device, screen) === "native";
+      content.append(hint(native
+        ? "Experimental native clock/date. Preview is an image-layout approximation; firmware font 2 and device time-format preferences determine the actual appearance. Send installs it and synchronizes device-wide time/timezone."
+        : screenTransport(device, screen) === "jpeg"
+          ? "Experimental direct JPEG upload. No media download; compression may slightly change the preview."
+          : "GIF URL playback. The device must download the image or animation from the media server."));
       const schedule = field(screen, "schedule", "Schedule", "select", {
         interval: "Every interval", daily: "Daily at local time",
         ...(screen.kind === "clock" ? {on_time_change: "On time change"} : {}),
@@ -693,14 +707,17 @@ function screensPage(main) {
         : field(screen, "refresh_seconds", "Refresh interval (seconds, minimum 10)", "number");
       const updateScheduleControls = () => {
         for (const label of [schedule, timing].filter(Boolean)) {
-          label.querySelector("input, select").disabled = !screen.enabled;
+          label.querySelector("input, select").disabled = !screen.enabled || native;
         }
       };
       content.append(field(screen, "enabled", "Automatic pushes", "checkbox", null, () => {
         mark();
         updateScheduleControls();
       }), schedule);
-      content.append(timing || hint(`Pushes at each minute change (${config.timezone}), while automatic pushes are enabled.`));
+      content.append(native
+        ? hint("Automatic pushes install immediately after saving changes, then reinstall and sync time hourly. The device ticks between updates. Image schedule values are preserved but ignored in native mode. Off means manual Send / Restore layout only.")
+        : timing || hint(`Pushes at each minute change (${config.timezone}), while automatic pushes are enabled.`));
+      if (native && timing) content.append(timing);
       schedule.querySelector("select").addEventListener("change", render);
       updateScheduleControls();
       const send = button("Send", async () => {
@@ -731,7 +748,7 @@ function screensPage(main) {
   });
   updateDeviceStatus();
   updateScreenDrafts();
-  main.append(hint("A generated clock needs controller updates to keep time. GIFs play on the device after downloading. An acknowledgement is not proof of rendering."));
+  main.append(hint("Image clocks need controller updates to keep time; native clocks tick on the device. Uploaded media always uses GIF downloads. An acknowledgement is not proof of rendering."));
 }
 
 function profileSnapshot(device, name) {
@@ -883,6 +900,14 @@ function devicesPage(main) {
       field(device, "name", "Name"), field(device, "host", "Private IPv4 address"),
       hardware, node("label", {}, node("span", {}, "LocalToken (masked; saved unencrypted on disk)"), token),
       hint("Changing the IP or hardware clears the saved token unless you enter a replacement. Only configured screens are managed."),
+      field(device, "widget_transport", "Generated widget transport", "select", {
+        gif: "GIF URL download (default)", jpeg: "Direct JPEG upload (experimental)",
+      }),
+      field(device, "clock_renderer", "Clock rendering", "select", {
+        image: "Image widget (uses selected transport)", native: "Native clock / date (experimental)",
+      }),
+      hint("Save configuration to persist. Transport applies to generated widgets only; uploaded images and animated GIFs always keep GIF URL playback. Native clocks take priority over widget transport."),
+      hint("Native clocks require a downloadable background GIF at setup, use firmware font 2, and synchronize device-wide time/timezone. Enabled clock schedules become immediate setup plus hourly refreshes; sleep/pause still apply. Firmware compatibility and visible output need physical verification. Failed writes are reported without immediate retries or transport fallback."),
       button("Remove device", () => {
         if (config.devices.length === 1) throw Error("Keep at least one device");
         if (!confirm("Remove this device and its schedules?")) return;
@@ -912,7 +937,8 @@ function devicesPage(main) {
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)),
       value => value.toString(16).padStart(2, "0")).join("");
     config.devices.push({id, name: "Times Gate", host: "",
-      hardware: 402, screens: Array.from({length: 5}, () => ({
+      hardware: 402, widget_transport: "gif", clock_renderer: "image",
+      screens: Array.from({length: 5}, () => ({
         kind: "unmanaged", enabled: false, title: "", text: "", media_id: "", refresh_seconds: 60,
         schedule: "interval", daily_time: "08:00", strava_mode: "ytd", units: "metric",
       }))});
@@ -1328,7 +1354,9 @@ function scheduledUpdatesTable() {
     for (const item of state.schedules.filter(item => item.device_id === device.id)) {
       if (activityFailures && item.last_run?.status !== "error") continue;
       const screen = device.screens[item.panel];
-      const schedule = screen.schedule === "daily"
+      const schedule = screenTransport(device, screen) === "native"
+        ? "Hourly native clock setup / time sync"
+        : screen.schedule === "daily"
         ? `Daily at ${screen.daily_time} (${state.config.timezone})`
         : screen.schedule === "on_time_change" ? "Every minute (on time change)"
           : `Every ${screen.refresh_seconds} seconds`;

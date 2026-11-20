@@ -1,4 +1,6 @@
+import base64
 from datetime import datetime
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -6,8 +8,10 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from PIL import Image
+import requests
 
 from timesgate.engine import Engine
+from timesgate.media import encode_full_frames
 from timesgate.models import Configuration, Device, Screen, next_due
 from timesgate.protocol import DeviceError, play_gif
 from timesgate.store import Conflict, Store
@@ -284,6 +288,241 @@ class StoreTests(unittest.TestCase):
         pause.assert_called_once_with(2.0)
         self.assertEqual(self.store.jobs()[0]["status"], "cancelled")
         self.assertIn("stopping", self.store.jobs()[0]["message"])
+
+
+class HybridTransportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.store = Store(self.root / "state.sqlite")
+        self.config = self.store.config()
+        self.config.timezone = "Asia/Kathmandu"
+        self.device = self.config.devices[0]
+        self.device.host, self.device.local_token = "192.168.1.10", 123456
+        self.device.screens[2] = Screen(kind="clock", title="TEST", accent="hot-pink")
+        self.engine = Engine(self.store, self.root, "http://nas.lan:8081", Mock())
+        pause = patch.object(self.engine.stopping, "wait", return_value=False)
+        pause.start()
+        self.addCleanup(pause.stop)
+        post = patch("timesgate.protocol.requests.post")
+        self.post = post.start()
+        self.addCleanup(post.stop)
+        self.post.return_value.status_code = 200
+        self.post.return_value.json.return_value = {"ReturnCode": 0}
+
+    def save(self, now=1000):
+        self.store.save_config(self.config, self.store.revision(), now=now)
+
+    def send(self):
+        key = self.store.enqueue("send", self.device.id, 2)
+        self.engine.process(self.store.claim())
+        return next(job for job in self.store.jobs() if job["id"] == key)
+
+    def test_jpeg_widgets_send_real_image_bytes_without_media_server_or_published_files(self):
+        self.device.widget_transport = "jpeg"
+        self.engine.media_base_url = ""
+        screen_values = [
+            {"kind": "clock"}, {"kind": "text"}, {"kind": "strava"},
+            {"kind": "weather", "latitude": 1, "longitude": 2},
+            {"kind": "countdown", "target": "2030-01-01T00:00"},
+            {"kind": "rss", "url": "https://example.com/feed"}, {"kind": "custom"},
+        ]
+        ids = set()
+        for values in screen_values:
+            with self.subTest(kind=values["kind"]):
+                self.device.screens[2] = Screen(**values)
+                self.save()
+                with patch.object(self.engine, "image", return_value=Image.new(
+                    "RGB", (128, 128), "#55e6b0",
+                )) as render:
+                    job = self.send()
+                self.assertEqual(job["status"], "acknowledged")
+                self.assertIn("Direct JPEG", job["message"])
+                render.assert_called_once_with(self.device.screens[2], self.config.timezone)
+                self.assertEqual(self.post.call_args.args[0], "http://192.168.1.10:9000/divoom_api")
+                data = self.post.call_args.kwargs["json"]
+                self.assertEqual(data["Command"], "Draw/SendHttpGif")
+                self.assertEqual(data["LcdArray"], [0, 0, 1, 0, 0])
+                self.assertEqual((data["PicNum"], data["PicOffset"], data["PicWidth"]), (1, 0, 128))
+                self.assertEqual(data["LocalToken"], 123456)
+                ids.add(data["PicID"])
+                with Image.open(io.BytesIO(base64.b64decode(data["PicData"], validate=True))) as image:
+                    self.assertEqual((image.format, image.size), ("JPEG", (128, 128)))
+                self.assertNotIn("FileName", data)
+        self.assertEqual(len(ids), len(screen_values))
+        self.assertEqual(list(self.root.glob("*.gif")), [])
+
+    def test_uploaded_animation_uses_unchanged_url_and_bytes_with_both_options_enabled(self):
+        self.device.widget_transport, self.device.clock_renderer = "jpeg", "native"
+        key = "a" * 32
+        animation = encode_full_frames(
+            [Image.new("RGB", (128, 128), color) for color in ("red", "blue")], [90, 130],
+        )
+        (self.root / f"{key}.gif").write_bytes(animation)
+        self.store.add_media(key, "Animated test", 2, 220)
+        self.device.screens[2] = Screen(kind="media", media_id=key)
+        self.save()
+        job = self.send()
+        self.assertEqual(job["status"], "acknowledged")
+        data = self.post.call_args.kwargs["json"]
+        self.assertEqual(data["Command"], "Device/PlayGif")
+        self.assertEqual(data["FileName"], [f"http://nas.lan:8081/{key}.gif"])
+        self.assertEqual(data["LcdArray"], [0, 0, 1, 0, 0])
+        self.assertEqual((self.root / f"{key}.gif").read_bytes(), animation)
+        self.assertEqual(self.post.call_count, 1)
+
+    def test_native_clock_overrides_jpeg_and_sends_sync_then_screen_specific_elements(self):
+        self.device.widget_transport, self.device.clock_renderer = "jpeg", "native"
+        for hardware in (400, 402):
+            with self.subTest(hardware=hardware):
+                self.device.hardware = hardware
+                self.save()
+                self.post.reset_mock()
+                with patch("timesgate.engine.time.time", return_value=1800000000):
+                    job = self.send()
+                self.assertEqual(job["status"], "acknowledged")
+                self.assertIn("Native clock", job["message"])
+                payloads = [call.kwargs["json"] for call in self.post.call_args_list]
+                self.assertEqual([body["Command"] for body in payloads], [
+                    "Device/SetUTC", "Sys/TimeZone", "Draw/SendHttpItemList",
+                ])
+                self.assertEqual(payloads[0]["Utc"], 1800000000)
+                self.assertEqual(payloads[1]["TimeZoneValue"], "GMT+5.75")
+                clock = payloads[2]
+                self.assertEqual((clock["LcdIndex"], clock["NewFlag"]), (2, 1))
+                self.assertEqual([item["type"] for item in clock["ItemList"]], [22, 5, 12])
+                self.assertEqual(clock["ItemList"][0]["TextString"], "TEST")
+                self.assertEqual(clock["ItemList"][0]["color"], "#FF6FAE")
+                self.assertTrue(all(
+                    item["align"] == (2 if hardware == 400 else 3)
+                    and item["x"] + item["TextWidth"] <= 128
+                    and item["y"] + item["Textheight"] <= 128
+                    for item in clock["ItemList"]
+                ))
+                background = self.root / clock["BackgroudGif"].rsplit("/", 1)[1]
+                with Image.open(background) as image:
+                    self.assertEqual((image.format, image.size, image.n_frames), ("GIF", (128, 128), 1))
+                    self.assertEqual(image.convert("RGB").getpixel((64, 64)), (8, 18, 30))
+
+    def test_native_partial_failure_stops_and_never_falls_back(self):
+        self.device.clock_renderer, self.device.widget_transport = "native", "jpeg"
+        self.save()
+        self.post.side_effect = [self.post.return_value, requests.Timeout()]
+        with self.assertLogs("timesgate.engine", level="ERROR"):
+            job = self.send()
+        self.assertEqual(job["status"], "error")
+        self.assertIn("1/3 commands acknowledged", job["message"])
+        self.assertEqual(self.post.call_count, 2)
+        self.assertGreater(self.engine.screen_send_ready[self.device.host], 0)
+
+    def test_jpeg_rejection_does_not_fall_back_to_url_playback(self):
+        self.device.widget_transport = "jpeg"
+        self.save()
+        self.post.return_value.json.return_value = {"ReturnCode": 1}
+        with self.assertLogs("timesgate.engine", level="ERROR"):
+            job = self.send()
+        self.assertEqual(job["status"], "error")
+        self.assertEqual(self.post.call_count, 1)
+        self.assertEqual(self.post.call_args.kwargs["json"]["Command"], "Draw/SendHttpGif")
+
+    def test_native_requires_media_origin_before_any_time_sync_write(self):
+        self.device.clock_renderer = "native"
+        self.engine.media_base_url = ""
+        self.save()
+        with self.assertLogs("timesgate.engine", level="ERROR"):
+            job = self.send()
+        self.assertEqual(job["status"], "error")
+        self.assertIn("MEDIA_BASE_URL", job["message"])
+        self.post.assert_not_called()
+
+    def test_native_and_jpeg_share_spacing_after_the_last_command_completes(self):
+        now = 100.0
+        starts = []
+
+        def wait(seconds):
+            nonlocal now
+            now += seconds
+            return False
+
+        def post(*args, **kwargs):
+            nonlocal now
+            starts.append(now)
+            now += 3
+            return self.post.return_value
+
+        self.post.side_effect = post
+        self.device.clock_renderer = "native"
+        self.save()
+        with patch("timesgate.engine.time.monotonic", side_effect=lambda: now), patch.object(
+            self.engine.stopping, "wait", side_effect=wait,
+        ) as pause:
+            self.assertEqual(self.send()["status"], "acknowledged")
+            self.device.clock_renderer, self.device.widget_transport = "image", "jpeg"
+            self.save()
+            self.assertEqual(self.send()["status"], "acknowledged")
+        self.assertEqual(starts, [100.0, 103.0, 106.0, 111.0])
+        pause.assert_called_once_with(2.0)
+
+    def test_new_transports_respect_sleep_pause_and_demo_without_writes(self):
+        for renderer in ("image", "native"):
+            self.device.clock_renderer, self.device.widget_transport = renderer, "jpeg"
+            self.save()
+            for guard in ("sleeping", "paused"):
+                with self.subTest(renderer=renderer, guard=guard):
+                    self.store.update_controls(self.device, **{"sleeping": False, "paused": False, guard: True})
+                    self.assertEqual(self.send()["status"], "cancelled")
+            self.store.update_controls(self.device, sleeping=False, paused=False)
+            self.engine.demo = True
+            self.assertEqual(self.send()["status"], "demo")
+        self.post.assert_not_called()
+
+    def test_native_schedule_is_immediate_then_hourly_and_image_schedule_is_preserved(self):
+        screen = self.device.screens[2]
+        screen.enabled, screen.schedule = True, "on_time_change"
+        self.save()
+        self.assertEqual(self.store.schedules()[0]["next_due"], 1020)
+        self.device.clock_renderer = "native"
+        self.save(now=1005)
+        self.assertEqual(self.store.schedules()[0]["next_due"], 1005)
+        self.store.schedule_due(1005)
+        self.assertEqual(self.store.schedules()[0]["next_due"], 4605)
+        job = self.store.claim()
+        self.store.finish(job["id"], "error", "Uncertain setup")
+        self.store.schedule_due(1060)
+        self.assertEqual(len(self.store.jobs()), 1)
+        self.save(now=1070)
+        reopened = Store(self.store.path)
+        self.assertEqual(reopened.schedules()[0]["next_due"], 4605)
+        self.assertEqual(reopened.config().devices[0].screens[2].schedule, "on_time_change")
+        reopened.schedule_due(10000)
+        self.assertEqual(reopened.schedules()[0]["next_due"], 13600)
+        self.assertEqual(len(reopened.jobs()), 2)
+        self.device.clock_renderer = "image"
+        self.save(now=10001)
+        self.assertEqual(self.store.schedules()[0]["next_due"], 10020)
+
+    def test_native_schedule_holds_until_wake_and_transport_changes_do_not_reset_media(self):
+        key = "a" * 32
+        self.store.add_media(key, "Test", 1, 100)
+        self.device.screens[1] = Screen(kind="media", enabled=True, media_id=key)
+        self.device.screens[2].enabled = True
+        self.save()
+        self.store.schedule_due(1000)
+        while job := self.store.claim():
+            self.store.finish(job["id"], "acknowledged", "Test")
+        self.device.clock_renderer, self.device.widget_transport = "native", "jpeg"
+        self.save(now=1010)
+        schedules = {row["panel"]: row for row in self.store.schedules()}
+        self.assertEqual(schedules[1]["next_due"], 1060)
+        self.assertEqual(schedules[2]["next_due"], 1010)
+        self.store.update_controls(self.device, sleeping=True)
+        self.store.schedule_due(2000)
+        self.assertIsNone(self.store.claim())
+        with patch("timesgate.store.time.time", return_value=2000):
+            self.store.update_controls(self.device, sleeping=False)
+        self.store.schedule_due(2000)
+        self.assertIsNotNone(self.store.claim())
 
 
 class ProtocolTests(unittest.TestCase):

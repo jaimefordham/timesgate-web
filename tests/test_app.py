@@ -35,6 +35,30 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.client.get("/media/file.gif").status_code, 404)
         self.assertTrue(self.client.get("/healthz").json()["ok"])
 
+    def test_device_transport_options_round_trip_without_sending_and_reject_invalid_values(self):
+        state = self.client.get("/api/state").json()
+        device = state["config"]["devices"][0]
+        self.assertEqual((device["widget_transport"], device["clock_renderer"]), ("gif", "image"))
+        device.update(widget_transport="jpeg", clock_renderer="native")
+        response = self.client.put("/api/config", json={
+            "config": state["config"], "revision": state["revision"],
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = self.client.get("/api/state").json()
+        device = saved["config"]["devices"][0]
+        self.assertEqual((device["widget_transport"], device["clock_renderer"]), ("jpeg", "native"))
+        self.assertEqual(saved["jobs"], [])
+        self.assertEqual(saved["schedules"], [])
+        for field, value in (("widget_transport", "png"), ("clock_renderer", "automatic")):
+            with self.subTest(field=field):
+                invalid = Configuration.model_validate(saved["config"]).model_dump()
+                invalid["devices"][0][field] = value
+                response = self.client.put("/api/config", json={
+                    "config": invalid, "revision": saved["revision"],
+                })
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(self.app.state.store.public_config(), saved["config"])
+
     def test_device_profiles_persist_drafts_without_changing_configuration_or_sending(self):
         store = self.app.state.store
         config = store.config()

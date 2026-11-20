@@ -10,10 +10,10 @@ import time
 from PIL import Image
 
 from .controls import control_commands, diagnostic_values, night_commands, night_phase, night_signature
-from .media import encode_full_frames, publish
+from .media import encode_full_frames, encode_jpeg, publish
 from .lighting import lighting_approval, lighting_payload, target_signature
 from .models import ControlRequest, METRICS, TAKEOVER_CONTROLS, Device, LightingSettings, Screen, http_base
-from .protocol import DeviceError, device_command, play_gif
+from .protocol import DeviceError, device_command, native_clock_payload, play_gif, send_jpeg
 from .render import render
 from .store import Store
 from .strava import Strava
@@ -189,7 +189,7 @@ class Engine(threading.Thread):
                                   ("Startup restoration" if restoring else "Manual lighting")
                                   + " acknowledged; visible lighting not verified")
                 return
-            device, screen, _ = self.select(job["device_id"], job["panel"])
+            device, screen, timezone = self.select(job["device_id"], job["panel"])
             controls = self.store.control_state(device)
             if controls["sleeping"] or controls["paused"]:
                 self.store.finish(key, "cancelled", "Displays asleep or controller paused; wake/resume before sending")
@@ -197,23 +197,63 @@ class Engine(threading.Thread):
             if job["automatic"] and not screen.enabled:
                 self.store.finish(key, "cancelled", "Schedule was disabled before execution")
                 return
-            if not self.demo and not self.media_base_url:
-                raise ValueError("Set MEDIA_BASE_URL to an HTTP origin reachable by the device")
-            name, _ = self.content(device.id, job["panel"])
+            native = screen.kind == "clock" and device.clock_renderer == "native"
+            direct = (
+                screen.kind not in ("media", "unmanaged")
+                and not native and device.widget_transport == "jpeg"
+            )
+            jpeg = None
+            clock = None
+            url = ""
+            if direct:
+                jpeg = encode_jpeg(self.image(screen, timezone))
+            else:
+                if not self.demo and not self.media_base_url:
+                    raise ValueError("Set MEDIA_BASE_URL to an HTTP origin reachable by the device")
+                if native:
+                    name = publish(self.directory, encode_full_frames(
+                        [Image.new("RGB", (128, 128), "#08121e")], [1000],
+                    ))
+                    self.store.remember_render(name)
+                else:
+                    name, _ = self.content(device.id, job["panel"])
+                if not self.demo:
+                    url = http_base(self.media_base_url, http_only=True) + "/" + name
+                    if native:
+                        clock = native_clock_payload(device, job["panel"], screen, url)
             if self.demo:
                 self.store.finish(key, "demo", "Rendered in demo mode; no device command sent")
                 return
-            base = http_base(self.media_base_url, http_only=True)
             delay = self.screen_send_ready.get(device.host, 0.0) - time.monotonic()
             if delay > 0 and self.stopping.wait(delay):
                 self.store.finish(key, "cancelled", "Controller stopping; screen send not attempted")
                 return
             try:
-                play_gif(device, job["panel"], base + "/" + name)
+                if clock is not None:
+                    request = ControlRequest(device_id=device.id, control={"action": "sync_time"})
+                    commands = [*control_commands(request, device, timezone, time.time()), clock]
+                    completed = 0
+                    try:
+                        for command in commands:
+                            device_command(device, command)
+                            completed += 1
+                    except DeviceError as error:
+                        raise DeviceError(
+                            f"Native clock: {completed}/{len(commands)} commands acknowledged; {error}"
+                        ) from None
+                    message = (
+                        "Native clock setup/time sync acknowledged; "
+                        "background download/rendering not verified"
+                    )
+                elif jpeg is not None:
+                    send_jpeg(device, job["panel"], jpeg)
+                    message = "Direct JPEG upload acknowledged; rendering not verified"
+                else:
+                    play_gif(device, job["panel"], url)
+                    message = "Playback command acknowledged; download/rendering not verified"
             finally:
                 self.screen_send_ready[device.host] = time.monotonic() + 2.0
-            self.store.finish(key, "acknowledged",
-                              "Playback command acknowledged; download/rendering not verified")
+            self.store.finish(key, "acknowledged", message)
         except Exception as error:
             # Unexpected errors remain visible, without logging secret-bearing response bodies.
             safe_types = (ValueError, RuntimeError)

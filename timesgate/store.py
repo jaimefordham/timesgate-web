@@ -125,14 +125,23 @@ class Store:
                         continue
                     key = f"{device.id}:{panel}"
                     keys.add(key)
-                    signature = hashlib.sha256(canonical({
+                    signature_data = {
                         "screen": screen.model_dump(), "host": device.host,
                         "hardware": device.hardware, "token": device.local_token,
                         "timezone": value.timezone,
-                    }).encode()).hexdigest()
+                    }
+                    native = screen.kind == "clock" and device.clock_renderer == "native"
+                    if native:
+                        signature_data["clock_renderer"] = "native"
+                    elif screen.kind != "media" and device.widget_transport != "gif":
+                        signature_data["widget_transport"] = device.widget_transport
+                    signature = hashlib.sha256(canonical(signature_data).encode()).hexdigest()
                     existing = db.execute("SELECT signature FROM schedules WHERE key=?", (key,)).fetchone()
                     if existing is None or existing["signature"] != signature:
-                        due = now if screen.schedule == "interval" else next_due(screen, value.timezone, now)
+                        due = (
+                            now if native or screen.schedule == "interval"
+                            else next_due(screen, value.timezone, now)
+                        )
                         db.execute("INSERT OR REPLACE INTO schedules VALUES (?, ?, ?, ?, ?)",
                                    (key, device.id, panel, signature, due))
             for row in db.execute("SELECT key FROM schedules").fetchall():
@@ -339,8 +348,9 @@ class Store:
                     "INSERT INTO jobs (id,operation,device_id,panel,automatic,status,created) VALUES (?,?,?,?,1,'pending',?)",
                     (uuid.uuid4().hex, "send", device.id, row["panel"], now),
                 )
-                db.execute("UPDATE schedules SET next_due=? WHERE key=?",
-                           (next_due(screen, config.timezone, now), row["key"]))
+                due = (now + 3600 if screen.kind == "clock" and device.clock_renderer == "native"
+                       else next_due(screen, config.timezone, now))
+                db.execute("UPDATE schedules SET next_due=? WHERE key=?", (due, row["key"]))
 
     def recover(self) -> None:
         with self.connect() as db:

@@ -16,6 +16,14 @@ def opaque(image: Image.Image) -> Image.Image:
     return Image.alpha_composite(Image.new("RGBA", rgba.size, "black"), rgba).convert("RGB")
 
 
+def encode_jpeg(image: Image.Image) -> bytes:
+    if image.size != (128, 128):
+        raise ValueError("Direct JPEG requires a 128x128 widget")
+    output = io.BytesIO()
+    opaque(image).save(output, "JPEG", quality=95, subsampling=0)
+    return output.getvalue()
+
+
 def encode_full_frames(frames: list[Image.Image], durations: list[int]) -> bytes:
     if not frames or len(frames) != len(durations):
         raise ValueError("Animation requires matching frames and durations")

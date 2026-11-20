@@ -161,6 +161,51 @@ Strava credentials. The command refuses to run while the controller holds its lo
 download that subsequently fails. Check the URL from a machine on the device's
 network; then check the display itself. No software-only check proves rendering.
 
+### Widget transport and native clocks (experimental)
+
+Each device has two opt-in settings in **Devices**, persisted by **Save
+configuration**. Existing devices default to **GIF URL download** and **Image
+widget** clock rendering; upgrading does not switch transports.
+
+- **Generated widget transport** selects GIF URL playback or **Direct JPEG
+  upload** for clock images, text, weather, Strava, countdown, RSS and custom
+  designs. JPEG sends one complete 128x128 image inside `Draw/SendHttpGif`,
+  without a separate media download. It may soften text slightly. Previews show
+  the source image before JPEG compression.
+- **Clock rendering: Native clock / date** overrides transport for Clock widgets
+  only. The firmware draws time and date, plus the heading, using font ID 2.
+  The preview is an image-layout approximation, not an exact native preview.
+  Appearance and time format depend on firmware/fonts and device preferences.
+- **Uploaded media is unchanged**, including static uploads and animated GIFs:
+  the existing normalization, frame timing and `Device/PlayGif` URL path remain.
+  Unmanaged screens are not written.
+
+Native setup sends device-wide UTC/timezone synchronization followed by a
+single-screen `Draw/SendHttpItemList` replacement with a downloadable background
+GIF. **MEDIA_BASE_URL must still be reachable by the device for native setup and
+uploaded/GIF playback.** Pure direct-JPEG generated widgets do not require it.
+Time synchronization can also affect other device-native clocks. Native
+elements are not guaranteed to match the image widget's 24-hour format.
+
+For native clocks, **Automatic pushes** means immediate setup after enabling or
+changing relevant configuration, then hourly setup/time synchronization. Existing
+interval/daily/time-change values are preserved but ignored until switching back
+to image rendering. With automatic pushes off, use **Send** or **Restore layout**
+to install manually; the clock continues ticking without controller updates.
+Hourly refreshes recover from device restarts and update timezone offsets after
+DST changes, with up to an hour's delay. Schedules survive controller restarts
+and coalesce missed refreshes. Sleep/pause guards and per-device send spacing
+apply to all transports.
+
+Both new paths are experimental: validate one screen on your firmware before
+enabling more. Native background initialization has been reported working on
+402 firmware 402077, but is not physically verified by this project; 400
+background behaviour differs. Acknowledgements do not verify visible output.
+Partial native setup failures report the acknowledged command count; no immediate
+retry, rollback or automatic transport fallback is attempted. A failed automatic
+native setup waits for its next hourly refresh, or an explicit manual Send.
+These settings are device-level and are not captured or changed by layout profiles.
+
 ### Device profiles
 
 Open **Profiles**, select a saved device, enter a name and choose **Save new
@@ -223,7 +268,7 @@ lighting startup-restoration approval. Those remain unchanged.
   be recovered; those screens show awaiting their first retained run.
 - Schedule and interval/daily-time controls are disabled while automatic pushes
   are off; their values are preserved when toggling automatic pushes.
-- Clock screens also offer **On time change**: with automatic pushes enabled,
+- Image clock screens also offer **On time change**: with automatic pushes enabled,
   updates are due at each local minute boundary in the configured timezone,
   beginning with the next minute after saving. No fixed interval is needed.
   The worker checks once per second; queued work and network/device delays can
@@ -251,8 +296,9 @@ lighting startup-restoration approval. Those remain unchanged.
   effect where applicable. Old manual writes are never replayed automatically.
 - Generated widget files are retained for 24 hours; uploaded media persists.
   Review disk usage and back up the storage directories.
-- Keep the containers running for clocks and statistics to refresh. Already
-  downloaded GIF animations continue on the device.
+- Keep the containers running for image clocks and statistics to refresh.
+  Installed native clocks tick without the controller; hourly time sync requires
+  it. Already downloaded GIF animations continue on the device.
 
 ### LCD controls and native tools (experimental)
 
