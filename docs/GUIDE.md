@@ -215,6 +215,16 @@ network; then check the display itself. No software-only check proves rendering.
 
 ### LCD controls and native tools (experimental)
 
+A compact **Device status** strip appears below the heading on every signed-in
+page, with a row for each saved device. It shows the configured automatic screen
+schedule count, sleep guard, controller pause and night schedule independently.
+Amber highlights held screen sends. **Wake displays** appears for an active
+sleep guard; **Restore / resume** appears when paused without that guard.
+These use the saved connection, never unsaved drafts. **Activity** opens the
+retained job details. The existing three-second refresh updates this strip;
+failed refreshes mark it stale and disable its recovery actions until refreshed.
+These are controller states, not proof that the physical device is awake or online.
+
 The device command bar on **Screens** and **Tools** has an LCD brightness draft,
 **Apply LCD brightness**, **Sleep displays**, **Wake displays**, **Restore layout /
 resume**, and a shortcut to RGB lighting. LCD brightness is independent of RGB

@@ -1,6 +1,8 @@
 const root = document.querySelector("#app");
 let state, config, revision, page = "Screens", selected = "", dirty = false, polling = false;
 let selectedPanel = 0, activityFailures = false;
+let statusStale = false;
+const pendingControls = new Set();
 const activityDetails = new Set();
 const objectUrls = [];
 const lightingDrafts = new Map();
@@ -177,6 +179,7 @@ function designEditor(screen) {
 function current() { return config.devices.find(item => item.id === selected) || config.devices[0]; }
 async function load() {
   state = await request("state");
+  statusStale = false;
   config = structuredClone(state.config); revision = state.revision; dirty = false;
   if (!config.devices.some(device => device.id === selected)) selected = config.devices[0].id;
 }
@@ -285,6 +288,11 @@ function render() {
       await load(); render();
     }), page === "Lighting" ? null
       : button("Save configuration", async () => { await save(); notify("Configuration saved"); }, true))));
+  main.append(node("section", {class: "device-status-strip", "aria-label": "Global device status"},
+    node("div", {class: "device-status-heading"},
+      node("h2", {}, "Device status"),
+      node("span", {id: "device-status-freshness", role: "status"})),
+    node("div", {id: "global-device-status"})));
   if (state.demo) main.append(node("div", {class: "banner"}, "Demo mode uses sample weather, news and metrics; it never contacts Times Gate, Strava or widget sources."));
   if (!state.media_base_url && page !== "Lighting") main.append(node("div", {class: "banner warning"},
     "Set MEDIA_BASE_URL before live sends. It must be an HTTP address reachable from the Times Gate."));
@@ -296,6 +304,7 @@ function render() {
   if (page === "Strava") stravaPage(main);
   if (page === "Activity") activityPage(main);
   if (page === "Settings") settingsPage(main);
+  updateGlobalDeviceStatus();
 }
 function deviceSelector(devices, label = "Device") {
   const selector = node("select", {"aria-label": label});
@@ -307,11 +316,79 @@ function deviceSelector(devices, label = "Device") {
 function applyStatus(latest) {
   for (const key of ["jobs", "schedules", "config", "lighting", "lighting_restoration",
     "strava", "controls", "device_schedules", "lighting_presets"]) state[key] = latest[key];
+  statusStale = false;
+  updateGlobalDeviceStatus();
   updateLightingStatus();
   updateDeviceStatus();
   updateScreenDrafts();
   document.querySelector("#scheduled-updates")?.replaceChildren(scheduledUpdatesTable());
   document.querySelector("#job-list")?.replaceChildren(jobsTable());
+}
+function updateGlobalDeviceStatus() {
+  const target = document.querySelector("#global-device-status");
+  if (!target || !state) return;
+  const summary = state.config.devices.map(device => {
+    const runtime = state.controls[device.id];
+    return {
+      id: device.id, name: device.name,
+      configured: Boolean(device.host && (device.hardware !== 402 || device.local_token_set)),
+      available: Boolean(runtime), sleeping: runtime?.sleeping, paused: runtime?.paused,
+      pushes: device.screens.filter(screen => screen.enabled).length,
+      night: device.night, timezone: state.config.timezone,
+      busy: pendingControls.has(device.id) || state.jobs.some(job => job.device_id === device.id
+        && ["control", "device_schedule"].includes(job.operation)
+        && ["pending", "running"].includes(job.status)),
+    };
+  });
+  const signature = JSON.stringify([statusStale, summary]);
+  if (target.dataset.status === signature) return;
+  target.dataset.status = signature;
+  const freshness = document.querySelector("#device-status-freshness");
+  freshness.textContent = statusStale ? "Status stale / refresh failed"
+    : state.demo ? "Demo / local state only" : "Controller state / not live device feedback";
+  freshness.classList.toggle("status-warning", statusStale);
+  target.replaceChildren(...summary.map(item => {
+    const blocked = item.sleeping || item.paused;
+    const uncertain = statusStale || !item.available;
+    const metric = (label, value, warning = false, title = "") => node("div", {
+      class: `device-status-metric${warning ? " status-warning" : ""}`, title,
+    }, node("span", {}, label), node("strong", {}, value));
+    const activity = button("Activity", () => { selected = item.id; page = "Activity"; render(); });
+    const actions = node("div", {class: "device-status-actions"}, activity);
+    if (item.sleeping || item.paused) {
+      const wake = Boolean(item.sleeping);
+      const recover = button(wake ? "Wake displays" : "Restore / resume", () => {
+        const device = state.config.devices.find(device => device.id === item.id);
+        return sendControl(device, wake ? {action: "power", on: true} : {action: "resume"});
+      });
+      recover.className = "device-status-recover";
+      recover.disabled = uncertain || !item.configured || item.busy;
+      recover.title = statusStale ? "Wait for a successful status refresh before sending."
+        : item.busy ? "A device control is pending or running."
+        : wake ? "Release the sleep guard after wake acknowledgement."
+        : "Release the pause and send configured managed screens, including unscheduled screens.";
+      actions.prepend(recover);
+    }
+    const description = uncertain ? "Status unavailable"
+      : !item.configured ? "Connection not configured"
+      : blocked ? "Screen sends held" : "Screen sends permitted";
+    const night = item.night.enabled
+      ? `${item.night.mode === "sleep" ? "Sleep" : "Dim"} ${item.night.start} - ${item.night.end}` : "Off";
+    return node("article", {
+      class: `device-status-row${blocked || uncertain ? " device-status-attention" : ""}`,
+      "aria-label": `${item.name} controller status`,
+    },
+    node("div", {class: "device-status-identity"},
+      node("span", {class: "device-status-glyph", "aria-hidden": "true"},
+        ...Array.from({length: 5}, () => node("span"))),
+      node("div", {}, node("strong", {}, item.name), node("span", {}, description))),
+    node("div", {class: "device-status-metrics"},
+      metric("Screen schedules", `${item.pushes} automatic`),
+      metric("Sleep guard", item.available ? item.sleeping ? "Active" : "Off" : "Unknown", item.sleeping),
+      metric("Controller", item.available ? item.paused ? "Paused" : "Not paused" : "Unknown", item.paused),
+      metric("Night schedule", night, false, `Saved schedule in ${item.timezone}`)),
+    actions);
+  }));
 }
 async function sendControl(device, control) {
   const runtime = state.controls[device.id];
@@ -320,12 +397,23 @@ async function sendControl(device, control) {
     `Reboot ${device.name}? Displays will be interrupted and screen updates paused until you restore the layout.`)) return;
   if (takeover && !runtime?.paused && !confirm(
     `This experimental native tool may replace multiple screens on ${device.name}. Pause screen updates until you choose Restore layout?`)) return;
-  const result = await request("device/control", "POST", {
-    device_id: device.id, control, confirmed: takeover || control.action === "reboot",
-  });
-  notify(`Device control ${result.job.slice(0, 8)} queued. Check Activity; acceptance is not verified physical effect.`);
-  const latest = await request("state");
-  if (state) applyStatus(latest);
+  if (pendingControls.has(device.id)) throw Error("A device control is already being queued.");
+  pendingControls.add(device.id);
+  updateGlobalDeviceStatus();
+  try {
+    const result = await request("device/control", "POST", {
+      device_id: device.id, control, confirmed: takeover || control.action === "reboot",
+    });
+    notify(`Device control ${result.job.slice(0, 8)} queued. Check Activity; acceptance is not verified physical effect.`);
+    const latest = await request("state");
+    if (state) applyStatus(latest);
+  } catch (error) {
+    statusStale = true;
+    throw error;
+  } finally {
+    pendingControls.delete(device.id);
+    updateGlobalDeviceStatus();
+  }
 }
 function updateDeviceStatus() {
   for (const target of document.querySelectorAll("[data-control-status]")) {
@@ -343,8 +431,8 @@ function updateDeviceStatus() {
       node("div", {class: "status-chips"},
         node("span", {class: `pill${runtime.sleeping ? " guard-status" : ""}`},
           runtime.sleeping ? "Sleep requested / send guard active" : "No sleep guard"),
-        node("span", {class: `pill${runtime.paused ? " guard-status" : ""}`},
-          runtime.paused ? "Controller paused" : `${pushes} automatic screen schedule(s)`)),
+        node("span", {class: "pill"}, `${pushes} automatic screen schedule(s)`),
+        runtime.paused ? node("span", {class: "pill guard-status"}, "Controller paused") : null),
       job ? row(job.status === "done" ? node("span", {class: "pill"}, "Done (controller)") : ragBadge(job),
         runDetails(job) || hint("Device control is waiting.")) : null,
       node("details", {class: "control-status-details", ...(detailsOpen ? {open: ""} : {})},
@@ -1110,7 +1198,11 @@ setInterval(async () => {
     const latest = await request("state");
     if (!state) return;
     applyStatus(latest);
-  } catch (error) { notify("Status refresh failed: " + error.message, true); }
+  } catch (error) {
+    statusStale = true;
+    updateGlobalDeviceStatus();
+    notify("Status refresh failed: " + error.message, true);
+  }
   finally { polling = false; }
 }, 3000);
 try {
