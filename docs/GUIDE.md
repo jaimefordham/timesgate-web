@@ -161,6 +161,47 @@ Strava credentials. The command refuses to run while the controller holds its lo
 download that subsequently fails. Check the URL from a machine on the device's
 network; then check the display itself. No software-only check proves rendering.
 
+### Device profiles
+
+Open **Profiles**, select a saved device, enter a name and choose **Save new
+profile**. Up to 20 named profiles per device are stored in SQLite and survive
+browser closure, sign-out and container updates when the data directory is kept.
+Saving a profile captures the current drafts without saving the active
+configuration or sending device commands.
+
+Each snapshot contains all five screen positions, widget/content settings,
+accents, automatic schedules, night settings and full lighting settings.
+Lighting uses the current Lighting preview if present, otherwise the last
+acknowledged settings or the displayed defaults. Uploaded media is referenced,
+not copied; keep the media directory with your backups.
+
+Use **Restore profile** to replace only that device's screen, night and lighting
+drafts. Review them using the links to Screens, Lighting and night settings.
+**Save configuration** persists screens and night settings and activates enabled
+schedules. It also updates every loaded profile with its current screen, night
+and lighting drafts in the same transaction. The button is available on both
+Screens and Lighting when a profile is loaded. A failed save leaves both the
+configuration and profiles unchanged. **Send** updates an unscheduled screen
+immediately. Lighting requires
+its separate **Apply lighting** action. Restoring alone does not change saved
+settings, schedule jobs or device output. Other devices' drafts are untouched.
+
+Screens, Lighting and Profiles show **Loaded profile: name**, adding **Modified**
+when the drafts differ from that profile. Reverting the edits clears Modified.
+Saving configuration remembers the loaded profile per device across reloads;
+its saved lighting settings return as a preview, not a device command.
+
+**Update snapshot** replaces a profile with the current drafts. **Clone profile**
+creates an independent copy of the saved snapshot under the supplied clone name,
+not of unsaved drafts, and leaves the loaded profile unchanged. **Rename** and
+**Delete** manage saved profiles without changing active settings or media.
+Deleting a loaded profile clears its selection without discarding the drafts.
+Names must be unique within a device, ignoring case.
+
+Profiles do not include device identity, network settings, credentials, Strava
+authorisation, application timezone, browser theme, runtime sleep/tool state or
+lighting startup-restoration approval. Those remain unchanged.
+
 ### Scheduling and recovery
 
 - **Activity** starts with a **Scheduled updates** table covering every enabled
@@ -543,6 +584,7 @@ and restart the backend before refreshing the browser.
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
 node --check timesgate/static/app.js
+node --test tests/test_profiles_ui.cjs
 ```
 
 No Node packages or frontend build step are needed; the UI is ES modules and CSS.

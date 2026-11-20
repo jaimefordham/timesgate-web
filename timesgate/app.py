@@ -19,8 +19,8 @@ from .engine import Engine
 from .lighting import BACK_EFFECTS, EDGE_EFFECTS, target_signature
 from .media import MAX_UPLOAD, normalize, publish
 from .models import (
-    ConfigUpdate, ControlRequest, LightingPreset, LightingRequest, LightingRestoreRequest,
-    LightingSettings, SendRequest, StravaSettings,
+    ConfigUpdate, ControlRequest, DeviceProfile, LightingPreset, LightingRequest,
+    LightingRestoreRequest, LightingSettings, ProfileName, SendRequest, StravaSettings,
     WIDGET_ACCENTS, http_base,
 )
 from .store import Conflict, Store
@@ -185,6 +185,8 @@ def create_app(data_dir: Path | None = None, media_dir: Path | None = None, *,
                 "lighting_restoration": store.lighting_restoration(),
                 "controls": store.controls(), "device_schedules": store.device_schedules(),
                 "lighting_presets": store.get("lighting_presets", []),
+                "profiles": store.profiles(),
+                "active_profiles": store.active_profiles(),
                 "lighting_defaults": LightingSettings().model_dump(),
                 "lighting_effects": {"edges": EDGE_EFFECTS, "back": BACK_EFFECTS},
                 "media_base_url": media_base, "version": "0.1.0"}
@@ -192,7 +194,9 @@ def create_app(data_dir: Path | None = None, media_dir: Path | None = None, *,
     @app.put("/api/config")
     async def save_config(request: Request):
         values = ConfigUpdate.model_validate_json(await body(request, 2 * 1024 * 1024))
-        revision = app.state.store.save_config(values.config, values.revision)
+        revision = app.state.store.save_config(
+            values.config, values.revision, profiles=values.profiles,
+        )
         return {"revision": revision}
 
     @app.post("/api/send")
@@ -205,6 +209,33 @@ def create_app(data_dir: Path | None = None, media_dir: Path | None = None, *,
         if controls["sleeping"] or controls["paused"]:
             raise ValueError("Wake the displays and resume the controller before sending")
         return {"job": app.state.store.enqueue("send", values.device_id, values.panel)}
+
+    @app.put("/api/profiles")
+    async def save_profile(request: Request):
+        values = DeviceProfile.model_validate_json(await body(request, 256 * 1024))
+        app.state.store.save_profile(values)
+        return {"profiles": app.state.store.profiles(), "profile": values.model_dump()}
+
+    @app.post("/api/profiles/{key}/clone")
+    async def clone_profile(key: str, request: Request):
+        values = ProfileName.model_validate_json(await body(request, 16 * 1024))
+        clone = app.state.store.clone_profile(key, values.name)
+        return {"profiles": app.state.store.profiles(), "profile": clone.model_dump()}
+
+    @app.get("/api/profiles/{key}")
+    def get_profile(key: str):
+        return app.state.store.profile(key).model_dump()
+
+    @app.patch("/api/profiles/{key}")
+    async def rename_profile(key: str, request: Request):
+        values = ProfileName.model_validate_json(await body(request, 16 * 1024))
+        app.state.store.rename_profile(key, values.name)
+        return {"profiles": app.state.store.profiles()}
+
+    @app.delete("/api/profiles/{key}")
+    def delete_profile(key: str):
+        app.state.store.delete_profile(key)
+        return {"profiles": app.state.store.profiles()}
 
     @app.post("/api/device/control")
     async def device_control(request: Request):

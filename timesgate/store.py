@@ -10,7 +10,10 @@ import uuid
 
 from .lighting import lighting_approval, target_signature
 from .controls import night_next, night_phase, night_signature
-from .models import Configuration, Device, LightingPreset, LightingSettings, canonical, next_due
+from .models import (
+    Configuration, Device, DeviceProfile, LightingPreset, LightingSettings, Screen,
+    canonical, next_due,
+)
 
 
 class Conflict(ValueError):
@@ -43,6 +46,13 @@ class Store:
                 CREATE TABLE IF NOT EXISTS device_schedules (
                     device_id TEXT NOT NULL, phase TEXT NOT NULL, signature TEXT NOT NULL,
                     next_due REAL NOT NULL, PRIMARY KEY (device_id, phase)
+                );
+                CREATE TABLE IF NOT EXISTS device_profiles (
+                    id TEXT PRIMARY KEY, device_id TEXT NOT NULL,
+                    name TEXT NOT NULL, data TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS active_profiles (
+                    device_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL
                 );
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
@@ -77,7 +87,8 @@ class Store:
     def revision(self) -> str:
         return hashlib.sha256(canonical(self.get("config")).encode()).hexdigest()
 
-    def save_config(self, value: Configuration, revision: str, now: float | None = None) -> str:
+    def save_config(self, value: Configuration, revision: str, now: float | None = None, *,
+                    profiles: list[DeviceProfile] | None = None) -> str:
         now = time.time() if now is None else now
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -93,19 +104,20 @@ class Store:
                 if any(s.enabled for s in device.screens) or device.night.enabled:
                     if not device.host or (device.hardware == 402 and device.local_token is None):
                         raise ValueError("Scheduled devices require an IP and a LocalToken for hardware 402")
-                for screen in device.screens:
-                    media_ids = []
-                    if screen.kind == "media":
-                        media_ids.append(screen.media_id)
-                    elif screen.kind == "custom":
-                        media_ids.extend(
-                            layer.media_id for layer in screen.elements if layer.type == "image"
-                        )
-                    for media_id in filter(None, media_ids):
-                        if not db.execute("SELECT 1 FROM media WHERE id=?", (media_id,)).fetchone():
-                            raise ValueError("Selected media does not exist")
+                self._validate_screen_media(db, device.screens)
             new_json = canonical(value.model_dump())
             db.execute("UPDATE kv SET value=? WHERE key='config'", (new_json,))
+            profile_devices = set()
+            for profile in profiles or []:
+                device = next((item for item in value.devices if item.id == profile.device_id), None)
+                if device is None or profile.screens != device.screens or profile.night != device.night:
+                    raise ValueError("Profile snapshot must match this device's configuration")
+                if device.id in profile_devices:
+                    raise ValueError("Save only one loaded profile per device")
+                profile_devices.add(device.id)
+                self._save_profile(db, profile, require_existing=True)
+                db.execute("INSERT OR REPLACE INTO active_profiles VALUES (?,?)",
+                           (device.id, profile.id))
             keys = set()
             for device in value.devices:
                 for panel, screen in enumerate(device.screens):
@@ -156,6 +168,122 @@ class Store:
 
     def public_config(self) -> dict:
         return self.public_state()["config"]
+
+    @staticmethod
+    def _validate_screen_media(db: sqlite3.Connection, screens: list[Screen]) -> None:
+        for screen in screens:
+            media_ids = []
+            if screen.kind == "media":
+                media_ids.append(screen.media_id)
+            elif screen.kind == "custom":
+                media_ids.extend(
+                    layer.media_id for layer in screen.elements if layer.type == "image"
+                )
+            for media_id in filter(None, media_ids):
+                if not db.execute("SELECT 1 FROM media WHERE id=?", (media_id,)).fetchone():
+                    raise ValueError("Selected media does not exist")
+
+    def profiles(self) -> list[dict]:
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT id,device_id,name FROM device_profiles ORDER BY name COLLATE NOCASE,id",
+            )]
+
+    def active_profiles(self) -> dict[str, dict]:
+        with self.connect() as db:
+            rows = db.execute("""
+                SELECT p.* FROM device_profiles p JOIN active_profiles a
+                ON p.id=a.profile_id AND p.device_id=a.device_id
+            """).fetchall()
+        return {
+            row["device_id"]: DeviceProfile(
+                id=row["id"], device_id=row["device_id"], name=row["name"],
+                **json.loads(row["data"]),
+            ).model_dump() for row in rows
+        }
+
+    @staticmethod
+    def _validate_profile_name(db: sqlite3.Connection, device_id: str, name: str, key: str) -> None:
+        for row in db.execute(
+            "SELECT id,name FROM device_profiles WHERE device_id=?", (device_id,),
+        ):
+            if row["id"] != key and row["name"].casefold() == name.casefold():
+                raise ValueError("A profile with this name already exists for this device")
+
+    def save_profile(self, profile: DeviceProfile) -> None:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._save_profile(db, profile)
+
+    def _save_profile(self, db: sqlite3.Connection, profile: DeviceProfile, *,
+                      require_existing: bool = False) -> None:
+        config = Configuration.model_validate_json(db.execute(
+            "SELECT value FROM kv WHERE key='config'",
+        ).fetchone()["value"])
+        if not any(device.id == profile.device_id for device in config.devices):
+            raise ValueError("Save the device before creating a profile")
+        existing = db.execute(
+            "SELECT device_id FROM device_profiles WHERE id=?", (profile.id,),
+        ).fetchone()
+        if require_existing and existing is None:
+            raise ValueError("Loaded profile no longer exists; choose another profile before saving")
+        if existing and existing["device_id"] != profile.device_id:
+            raise ValueError("A profile cannot be moved to another device")
+        count = db.execute(
+            "SELECT count(*) FROM device_profiles WHERE device_id=?", (profile.device_id,),
+        ).fetchone()[0]
+        if not existing and count >= 20:
+            raise ValueError("Keep at most 20 saved profiles per device")
+        self._validate_profile_name(db, profile.device_id, profile.name, profile.id)
+        self._validate_screen_media(db, profile.screens)
+        db.execute("INSERT OR REPLACE INTO device_profiles VALUES (?,?,?,?)", (
+            profile.id, profile.device_id, profile.name,
+            canonical(profile.model_dump(exclude={"id", "device_id", "name"})),
+        ))
+
+    def profile(self, key: str) -> DeviceProfile:
+        with self.connect() as db:
+            return self._profile(db, key)
+
+    def _profile(self, db: sqlite3.Connection, key: str) -> DeviceProfile:
+        row = db.execute("SELECT * FROM device_profiles WHERE id=?", (key,)).fetchone()
+        if row is None:
+            raise ValueError("Unknown device profile")
+        profile = DeviceProfile(
+            id=row["id"], device_id=row["device_id"], name=row["name"],
+            **json.loads(row["data"]),
+        )
+        config = json.loads(db.execute(
+            "SELECT value FROM kv WHERE key='config'",
+        ).fetchone()["value"])
+        if not any(device["id"] == profile.device_id for device in config["devices"]):
+            raise ValueError("The device for this profile no longer exists")
+        self._validate_screen_media(db, profile.screens)
+        return profile
+
+    def clone_profile(self, key: str, name: str) -> DeviceProfile:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            source = self._profile(db, key)
+            clone = DeviceProfile(name=name, **source.model_dump(exclude={"id", "name"}))
+            self._save_profile(db, clone)
+            return clone
+
+    def rename_profile(self, key: str, name: str) -> None:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT device_id FROM device_profiles WHERE id=?", (key,)).fetchone()
+            if row is None:
+                raise ValueError("Unknown device profile")
+            self._validate_profile_name(db, row["device_id"], name, key)
+            db.execute("UPDATE device_profiles SET name=? WHERE id=?", (name, key))
+
+    def delete_profile(self, key: str) -> None:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("DELETE FROM device_profiles WHERE id=?", (key,)).rowcount == 0:
+                raise ValueError("Unknown device profile")
+            db.execute("DELETE FROM active_profiles WHERE profile_id=?", (key,))
 
     def enqueue(self, operation: str, device_id: str | None = None,
                 panel: int | None = None, *, payload: dict | None = None) -> str:

@@ -10,7 +10,9 @@ from PIL import Image
 
 from timesgate.app import create_app
 from timesgate.engine import Engine
-from timesgate.models import Configuration, DesignLayer, Device, LightingSettings, Screen, WIDGET_ACCENTS
+from timesgate.models import (
+    Configuration, DesignLayer, Device, DeviceProfile, LightingSettings, Screen, WIDGET_ACCENTS,
+)
 from timesgate.store import Store
 
 class AppTests(unittest.TestCase):
@@ -32,6 +34,280 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/state", headers={"Origin": "http://untrusted.invalid"}).status_code, 403)
         self.assertEqual(self.client.get("/media/file.gif").status_code, 404)
         self.assertTrue(self.client.get("/healthz").json()["ok"])
+
+    def test_device_profiles_persist_drafts_without_changing_configuration_or_sending(self):
+        store = self.app.state.store
+        config = store.config()
+        device = config.devices[0]
+        device.host, device.local_token = "192.168.1.10", 123456
+        config.devices.append(Device(name="Other", host="192.168.1.11", local_token=654321))
+        store.save_config(config, store.revision())
+        store.remember_lighting(device, LightingSettings(color="#36D9FF"))
+        store.put("strava_tokens", {"access_token": "private-strava-token"})
+        media_id = "a" * 32
+        store.add_media(media_id, "Example", 1, 100)
+        screens = [
+            Screen(kind="clock", enabled=True, schedule="on_time_change", accent="hot-pink"),
+            Screen(kind="media", media_id=media_id),
+            Screen(kind="custom", elements=[DesignLayer(type="image", media_id=media_id)]),
+            Screen(kind="text", text="Evening"),
+            Screen(),
+        ]
+        night = device.night.model_copy(update={"enabled": True, "mode": "dim", "brightness": 5})
+        profile = DeviceProfile(
+            name=" Evening ", device_id=device.id, screens=screens, night=night,
+            lighting=LightingSettings(color="#FFD166", brightness=12, cycle=True, keys=False),
+        )
+        before = store.public_state()
+        before_lighting = store.lighting()
+        before_controls = store.controls()
+        before_jobs = store.jobs()
+        before_schedules = store.schedules()
+        before_night = store.device_schedules()
+        with patch("timesgate.engine.device_command") as send:
+            response = self.client.put("/api/profiles", json=profile.model_dump())
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["profiles"], [{
+                "id": profile.id, "device_id": device.id, "name": "Evening",
+            }])
+            loaded = self.client.get(f"/api/profiles/{profile.id}")
+            self.assertEqual(loaded.status_code, 200, loaded.text)
+            self.assertEqual(loaded.json(), profile.model_dump())
+            send.assert_not_called()
+        self.assertEqual(Store(store.path).profile(profile.id), profile)
+        self.assertEqual(store.public_state(), before)
+        self.assertEqual(store.lighting(), before_lighting)
+        self.assertEqual(store.controls(), before_controls)
+        self.assertEqual(store.jobs(), before_jobs)
+        self.assertEqual(store.schedules(), before_schedules)
+        self.assertEqual(store.device_schedules(), before_night)
+        self.assertEqual(store.get("strava_tokens"), {"access_token": "private-strava-token"})
+        self.assertNotIn("123456", loaded.text)
+        self.assertNotIn("private-strava-token", loaded.text)
+        self.assertEqual(self.client.get("/api/state").json()["profiles"], response.json()["profiles"])
+
+    def test_device_profiles_validate_ownership_names_snapshots_and_access(self):
+        store = self.app.state.store
+        config = store.config()
+        other = Device(name="Other")
+        config.devices.append(other)
+        store.save_config(config, store.revision())
+        device = config.devices[0]
+        values = DeviceProfile(
+            name="Desk", device_id=device.id, screens=device.screens,
+            night=device.night, lighting=LightingSettings(),
+        ).model_dump()
+        self.assertEqual(self.client.put("/api/profiles", json=values, headers={
+            "Cookie": "",
+        }).status_code, 401)
+        self.assertEqual(self.client.put("/api/profiles", json=values, headers={
+            "Origin": "http://untrusted.invalid",
+        }).status_code, 403)
+        for invalid in (
+            {**values, "name": "   "},
+            {**values, "device_id": "b" * 32},
+            {**values, "screens": values["screens"][:4]},
+            {**values, "lighting": {**values["lighting"], "brightness": 101}},
+            {**values, "local_token": 123456},
+            {**values, "host": "192.168.1.10"},
+        ):
+            response = self.client.put("/api/profiles", json=invalid)
+            self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.client.put("/api/profiles", json=values).status_code, 200)
+        key = values["id"]
+        path = f"/api/profiles/{key}"
+        duplicate = {**values, "id": "c" * 32, "name": " desk "}
+        self.assertEqual(self.client.put("/api/profiles", json=duplicate).status_code, 400)
+        self.assertEqual(self.client.put("/api/profiles", json={
+            **values, "device_id": other.id,
+        }).status_code, 400)
+        self.assertEqual(self.client.put("/api/profiles", json={
+            **duplicate, "device_id": other.id,
+        }).status_code, 200)
+        for method in ("get", "patch", "delete"):
+            arguments = {"json": {"name": "Renamed"}} if method == "patch" else {}
+            self.assertEqual(getattr(self.client, method)(
+                path, headers={"Cookie": ""}, **arguments,
+            ).status_code, 401)
+        self.assertEqual(self.client.patch(path, json={"name": "   "}).status_code, 400)
+        self.assertEqual(self.client.patch(path, json={"name": " Work "}).status_code, 200)
+        self.assertEqual(self.client.get(path).json()["name"], "Work")
+        updated = {**values, "name": "Work", "lighting": {**values["lighting"], "keys": False}}
+        self.assertEqual(self.client.put("/api/profiles", json=updated).status_code, 200)
+        self.assertFalse(self.client.get(path).json()["lighting"]["keys"])
+        self.assertEqual(self.client.delete(path).status_code, 200)
+        self.assertEqual(self.client.get(path).status_code, 400)
+        self.assertEqual(self.client.delete(path).status_code, 400)
+        self.assertEqual(len(store.profiles()), 1)
+
+    def test_device_profiles_check_media_on_save_and_restore(self):
+        store = self.app.state.store
+        device = store.config().devices[0]
+        media_id = "d" * 32
+        profile = DeviceProfile(
+            name="Media", device_id=device.id,
+            screens=[Screen(kind="media", media_id=media_id), *device.screens[1:]],
+            night=device.night, lighting=LightingSettings(),
+        )
+        response = self.client.put("/api/profiles", json=profile.model_dump())
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("media does not exist", response.text)
+        profile.screens[0] = Screen(kind="custom", elements=[
+            DesignLayer(type="image", media_id=media_id),
+        ])
+        self.assertEqual(self.client.put("/api/profiles", json=profile.model_dump()).status_code, 400)
+        store.add_media(media_id, "Example", 1, 100)
+        self.assertEqual(self.client.put("/api/profiles", json=profile.model_dump()).status_code, 200)
+        with store.connect() as db:
+            db.execute("DELETE FROM media WHERE id=?", (media_id,))
+        self.assertEqual(self.client.get(f"/api/profiles/{profile.id}").status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/profiles/{profile.id}", json={
+            "name": "Missing media",
+        }).status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/profiles/{profile.id}").status_code, 200)
+
+    def test_device_profile_limit_allows_update_and_rejects_duplicate_renames(self):
+        store = self.app.state.store
+        device = store.config().devices[0]
+        profile = DeviceProfile(
+            name="Profile 0", device_id=device.id, screens=device.screens,
+            night=device.night, lighting=LightingSettings(),
+        )
+        store.save_profile(profile)
+        for index in range(1, 20):
+            store.save_profile(profile.model_copy(update={"id": f"{index:032x}", "name": f"Profile {index}"}))
+        self.assertEqual(len(store.profiles()), 20)
+        profile.lighting.brightness = 25
+        self.assertEqual(self.client.put("/api/profiles", json=profile.model_dump()).status_code, 200)
+        values = {**profile.model_dump(), "id": "e" * 32, "name": "Overflow"}
+        self.assertEqual(self.client.put("/api/profiles", json=values).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/profiles/{profile.id}/clone", json={
+            "name": "Overflow clone",
+        }).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/profiles/{profile.id}", json={
+            "name": "PROFILE 1",
+        }).status_code, 400)
+        self.assertEqual(store.profile(profile.id).name, "Profile 0")
+
+    def test_saving_configuration_updates_loaded_profile_and_remembers_selection_without_applying_lighting(self):
+        store = self.app.state.store
+        config = store.config()
+        device = config.devices[0]
+        device.host, device.local_token = "192.168.1.10", 123456
+        store.save_config(config, store.revision())
+        profile = DeviceProfile(
+            name="Desk", device_id=device.id, screens=device.screens,
+            night=device.night, lighting=LightingSettings(),
+        )
+        store.save_profile(profile)
+        config.devices[0].screens[0] = Screen(kind="text", text="Edited layout")
+        config.devices[0].night.day_brightness = 45
+        changed = DeviceProfile(
+            id=profile.id, name=profile.name, device_id=device.id,
+            screens=config.devices[0].screens, night=config.devices[0].night,
+            lighting=LightingSettings(color="#FFD166", brightness=25),
+        )
+        before_jobs, before_lighting = store.jobs(), store.lighting()
+        with patch("timesgate.engine.device_command") as send:
+            response = self.client.put("/api/config", json={
+                "config": config.model_dump(), "revision": store.revision(),
+                "profiles": [changed.model_dump()],
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            send.assert_not_called()
+        self.assertEqual(store.config().devices[0].screens[0].text, "Edited layout")
+        self.assertEqual(store.profile(profile.id), changed)
+        self.assertEqual(Store(store.path).active_profiles(), {device.id: changed.model_dump()})
+        state = self.client.get("/api/state").json()
+        self.assertEqual(state["active_profiles"][device.id], changed.model_dump())
+        self.assertNotIn("local_token", str(state["active_profiles"]))
+        self.assertEqual(store.jobs(), before_jobs)
+        self.assertEqual(store.lighting(), before_lighting)
+        store.rename_profile(profile.id, "Evening")
+        self.assertEqual(store.active_profiles()[device.id]["name"], "Evening")
+        before = store.public_state()
+        store.delete_profile(profile.id)
+        self.assertEqual(store.active_profiles(), {})
+        self.assertEqual(store.public_state(), before)
+
+    def test_failed_loaded_profile_save_rolls_back_configuration_and_all_profile_updates(self):
+        store = self.app.state.store
+        config = store.config()
+        config.devices[0].host, config.devices[0].local_token = "192.168.1.10", 123456
+        config.devices.append(Device(name="Other", host="192.168.1.11", local_token=654321))
+        store.save_config(config, store.revision())
+        profiles = [
+            DeviceProfile(
+                name="Desk", device_id=device.id, screens=device.screens,
+                night=device.night, lighting=LightingSettings(),
+            ) for device in config.devices
+        ]
+        for profile in profiles:
+            store.save_profile(profile)
+        before = store.public_state()
+        config.devices[0].screens[0] = Screen(kind="clock", enabled=True)
+        changed = [
+            profile.model_copy(update={"screens": device.screens, "night": device.night})
+            for profile, device in zip(profiles, config.devices)
+        ]
+        changed[0].lighting.color = "#FFD166"
+        store.delete_profile(profiles[1].id)
+        response = self.client.put("/api/config", json={
+            "config": config.model_dump(), "revision": store.revision(),
+            "profiles": [profile.model_dump() for profile in changed],
+        })
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("no longer exists", response.text)
+        self.assertEqual(store.public_state(), before)
+        self.assertEqual(store.profile(profiles[0].id).lighting.color, "#55e6b0")
+        self.assertEqual(store.schedules(), [])
+        self.assertEqual(store.active_profiles(), {})
+        self.assertEqual(len(store.profiles()), 1)
+        mismatch = changed[0].model_copy(update={"night": config.devices[1].night.model_copy(
+            update={"day_brightness": 1},
+        )})
+        response = self.client.put("/api/config", json={
+            "config": config.model_dump(), "revision": store.revision(),
+            "profiles": [mismatch.model_dump()],
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(store.public_state(), before)
+
+    def test_cloning_profiles_copies_saved_snapshot_and_keeps_source_and_active_settings_independent(self):
+        store = self.app.state.store
+        config = store.config()
+        device = config.devices[0]
+        source = DeviceProfile(
+            name="Desk", device_id=device.id,
+            screens=[Screen(kind="text", text="Saved snapshot"), *device.screens[1:]],
+            night=device.night, lighting=LightingSettings(color="#FFD166"),
+        )
+        store.save_profile(source)
+        before = store.public_state()
+        path = f"/api/profiles/{source.id}/clone"
+        for headers, status in (
+            ({"Cookie": ""}, 401),
+            ({"Origin": "http://untrusted.invalid"}, 403),
+        ):
+            self.assertEqual(self.client.post(path, json={"name": "Copy"}, headers=headers).status_code, status)
+        response = self.client.post(path, json={"name": " Evening "})
+        self.assertEqual(response.status_code, 200, response.text)
+        clone = DeviceProfile.model_validate(response.json()["profile"])
+        self.assertNotEqual(clone.id, source.id)
+        self.assertEqual(clone.name, "Evening")
+        self.assertEqual(clone.screens, source.screens)
+        self.assertEqual(clone.night, source.night)
+        self.assertEqual(clone.lighting, source.lighting)
+        self.assertEqual(clone.device_id, device.id)
+        self.assertEqual(store.public_state(), before)
+        self.assertEqual(store.active_profiles(), {})
+        self.assertEqual(store.jobs(), [])
+        source.screens[0].text = "Changed source"
+        store.save_profile(source)
+        self.assertEqual(store.profile(clone.id).screens[0].text, "Saved snapshot")
+        self.assertEqual(self.client.post(path, json={"name": "evening"}).status_code, 400)
+        self.assertEqual(self.client.post(path, json={"name": " "}).status_code, 400)
+        self.assertEqual(self.client.post("/api/profiles/missing/clone", json={"name": "Copy"}).status_code, 400)
 
     def test_lighting_requires_authentication_and_valid_saved_target_and_simulates_in_demo(self):
         settings = {"color": "#36D9FF", "brightness": 60, "zone": 2, "effect": 5}

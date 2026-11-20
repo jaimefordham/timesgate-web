@@ -203,11 +203,6 @@ class Configuration(Model):
         return self
 
 
-class ConfigUpdate(Model):
-    config: Configuration
-    revision: str
-
-
 class SendRequest(Model):
     device_id: str
     panel: StrictInt = Field(ge=0, le=4)
@@ -231,6 +226,32 @@ class LightingRequest(Model):
 class LightingRestoreRequest(Model):
     device_id: str
     enabled: StrictBool
+
+
+class ProfileName(Model):
+    name: str = Field(min_length=1, max_length=40)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Enter a profile name")
+        return value
+
+
+class DeviceProfile(ProfileName):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex, pattern=r"^[a-f0-9]{32}$")
+    device_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    screens: list[Screen] = Field(min_length=5, max_length=5)
+    night: NightMode
+    lighting: LightingSettings
+
+
+class ConfigUpdate(Model):
+    config: Configuration
+    revision: str
+    profiles: list[DeviceProfile] = Field(default_factory=list, max_length=10)
 
 
 class LightingPreset(Model):

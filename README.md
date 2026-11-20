@@ -28,6 +28,8 @@ not photographs or live device feedback.*
   schedules, native preferences, timer, stopwatch, scoreboard, noise meter,
   buzzer and diagnostics.
 - **Make it yours:** four UI themes and eight widget accent colours.
+- **Device profiles:** save and clone screen layouts, schedules and lighting setups;
+  restore a draft for review before saving or applying.
 - **Self-hosted persistence:** one administrator login, settings in SQLite and
   separate private data and device-media storage.
 

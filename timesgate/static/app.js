@@ -6,6 +6,7 @@ const pendingControls = new Set();
 const activityDetails = new Set();
 const objectUrls = [];
 const lightingDrafts = new Map();
+const loadedProfiles = new Map();
 const controlDrafts = new Map();
 const themes = {graphite: "Graphite", porcelain: "Porcelain", carbon: "Carbon", paper: "Paper"};
 const widgetNames = {
@@ -67,11 +68,18 @@ function mark() {
   updateScreenDrafts();
 }
 function updateUnsavedConfiguration() {
+  const profileDirty = config?.devices.some(device => {
+    const profile = loadedProfiles.get(device.id);
+    return profile && (profileModified(device, profile)
+      || !state.profiles.some(item => item.id === profile.id));
+  });
   const status = document.querySelector("#save-state");
   if (status) status.textContent = dirty ? "Unsaved changes"
+    : profileDirty ? "Unsaved profile changes"
     : page === "Lighting" ? "Preview locally, then Apply lighting" : "Saved configuration";
   const warning = document.querySelector("#unsaved-configuration");
-  if (warning) warning.hidden = !dirty;
+  if (warning) warning.hidden = !dirty && !profileDirty;
+  updateLoadedProfileStatus();
   fitDeviceStatusPanel();
 }
 function field(object, key, label, type = "text", options = null, changed = mark) {
@@ -187,16 +195,32 @@ async function load() {
   state = await request("state");
   statusStale = false;
   config = structuredClone(state.config); revision = state.revision; dirty = false;
+  loadedProfiles.clear();
+  for (const device of config.devices) {
+    const profile = state.active_profiles[device.id];
+    if (profile) {
+      loadedProfiles.set(device.id, structuredClone(profile));
+      lightingDrafts.set(device.id, structuredClone(profile.lighting));
+    }
+  }
   if (!config.devices.some(device => device.id === selected)) selected = config.devices[0].id;
 }
 async function save() {
-  const result = await request("config", "PUT", {config, revision});
+  const profiles = config.devices.flatMap(device => {
+    const loaded = loadedProfiles.get(device.id);
+    if (!loaded) return [];
+    const profile = state.profiles.find(item => item.id === loaded.id);
+    if (!profile) throw Error("Loaded profile no longer exists; choose another profile before saving.");
+    return [{...profileSnapshot(device, profile.name), id: profile.id}];
+  });
+  const result = await request("config", "PUT", {config, revision, profiles});
   revision = result.revision;
   await load(); render();
 }
 function login(setup = false) {
   state = null; config = null; revision = null; dirty = false;
   lightingDrafts.clear();
+  loadedProfiles.clear();
   controlDrafts.clear();
   objectUrls.splice(0).forEach(url => URL.revokeObjectURL(url));
   const username = node("input", {
@@ -277,7 +301,7 @@ function render() {
   root.replaceChildren(node("div", {class: "layout"},
     node("aside", {}, node("div", {class: "brand"}, "TIMESGATE / WEB"),
       node("div", {class: "tag"}, state.demo ? "DEMO · NO DEVICE WRITES" : "SINGLE-OWNER CONTROLLER"),
-      node("nav", {"aria-label": "Sections"}, ...["Screens", "Lighting", "Tools", "Media", "Devices"].map(navButton),
+      node("nav", {"aria-label": "Sections"}, ...["Screens", "Lighting", "Profiles", "Tools", "Media", "Devices"].map(navButton),
         plugins, ...["Activity", "Settings"].map(navButton)),
       hint("Schedules run in the container, even when this browser is closed.")),
     node("div", {class: "workspace"},
@@ -300,25 +324,26 @@ function render() {
         "aria-label": "Unsaved configuration"},
         node("div", {role: "status"},
           node("strong", {}, "Unsaved configuration"),
-          node("span", {}, "Your configuration edits are not saved. Save configuration to persist them.")),
-        button("Save configuration", async () => { await save(); notify("Configuration saved"); }, true))),
+          node("span", {}, "Save configuration to persist your configuration and loaded-profile edits. Lighting is sent only by Apply lighting.")),
+        button("Save configuration", async () => { await save(); notify("Configuration and loaded profiles saved. Lighting was not sent."); }, true))),
       main)));
   [...root.querySelectorAll("nav button")].find(item => item.textContent === page)?.classList.add("active");
   main.append(node("header", {},
     node("div", {}, node("h1", {}, page), node("span", {id: "save-state", class: "muted"},
       page === "Lighting" ? "Preview locally, then Apply lighting" : dirty ? "Unsaved changes" : "Saved configuration")),
     row(themePicker(), button("Reload", async () => {
-      if ((dirty || page === "Lighting" || page === "Tools") && !confirm("Discard unsaved changes?")) return;
+      if ((dirty || lightingDrafts.size || page === "Tools") && !confirm("Discard unsaved changes?")) return;
       lightingDrafts.clear();
       controlDrafts.clear();
       await load(); render();
-    }), page === "Lighting" ? null
-      : button("Save configuration", async () => { await save(); notify("Configuration saved"); }, true))));
+    }), page === "Lighting" && !loadedProfiles.has(selected) ? null
+      : button("Save configuration", async () => { await save(); notify("Configuration and loaded profiles saved. Lighting was not sent."); }, true))));
   if (state.demo) main.append(node("div", {class: "banner"}, "Demo mode uses sample weather, news and metrics; it never contacts Times Gate, Strava or widget sources."));
   if (!state.media_base_url && page !== "Lighting") main.append(node("div", {class: "banner warning"},
     "Set MEDIA_BASE_URL before live sends. It must be an HTTP address reachable from the Times Gate."));
   if (page === "Screens") screensPage(main);
   if (page === "Lighting") lightingPage(main);
+  if (page === "Profiles") profilesPage(main);
   if (page === "Tools") toolsPage(main);
   if (page === "Media") mediaPage(main);
   if (page === "Devices") devicesPage(main);
@@ -337,12 +362,13 @@ function deviceSelector(devices, label = "Device") {
 }
 function applyStatus(latest) {
   for (const key of ["jobs", "schedules", "config", "lighting", "lighting_restoration",
-    "strava", "controls", "device_schedules", "lighting_presets"]) state[key] = latest[key];
+    "strava", "controls", "device_schedules", "lighting_presets", "profiles", "active_profiles"]) state[key] = latest[key];
   statusStale = false;
   updateGlobalDeviceStatus();
   updateLightingStatus();
   updateDeviceStatus();
   updateScreenDrafts();
+  updateUnsavedConfiguration();
   document.querySelector("#scheduled-updates")?.replaceChildren(scheduledUpdatesTable());
   document.querySelector("#job-list")?.replaceChildren(jobsTable());
 }
@@ -580,7 +606,7 @@ function screensPage(main) {
   main.append(row(selector), hint("Set content for each screen. Automatic pushes start only after saving an enabled schedule. Native/unmanaged screens are left untouched."));
   const device = current();
   const savedDevice = state.config.devices.find(item => item.id === device.id);
-  main.append(deviceBar(device));
+  main.append(loadedProfileBanner(device), deviceBar(device));
   const overview = node("div", {class: "screen-overview", role: "group", "aria-label": "Five-screen overview"});
   const previews = [];
   device.screens.forEach((screen, panel) => {
@@ -706,6 +732,117 @@ function screensPage(main) {
   updateDeviceStatus();
   updateScreenDrafts();
   main.append(hint("A generated clock needs controller updates to keep time. GIFs play on the device after downloading. An acknowledgement is not proof of rendering."));
+}
+
+function profileSnapshot(device, name) {
+  return {
+    device_id: device.id, name,
+    screens: structuredClone(device.screens),
+    night: structuredClone(device.night),
+    lighting: structuredClone(lightingDrafts.get(device.id)
+      || state.lighting[device.id]?.settings || state.lighting_defaults),
+  };
+}
+function profileModified(device, profile) {
+  const draft = profileSnapshot(device, profile.name);
+  return JSON.stringify([draft.screens, draft.night, draft.lighting])
+    !== JSON.stringify([profile.screens, profile.night, profile.lighting]);
+}
+function loadedProfileBanner(device) {
+  return node("div", {
+    class: "banner loaded-profile", "data-loaded-profile": device.id,
+    role: "status", "aria-live": "polite",
+  });
+}
+function updateLoadedProfileStatus() {
+  if (!state || !config) return;
+  for (const target of document.querySelectorAll("[data-loaded-profile]")) {
+    const device = config.devices.find(item => item.id === target.dataset.loadedProfile);
+    const profile = loadedProfiles.get(device?.id);
+    const saved = profile && state.profiles.find(item => item.id === profile.id);
+    const modified = profile && profileModified(device, profile);
+    target.textContent = !profile ? "Loaded profile: none. Create or restore one in Profiles."
+      : !saved ? `Loaded profile: ${profile.name} · Deleted — choose another profile before saving.`
+      : `Loaded profile: ${saved.name}${modified ? " · Modified" : ""}`;
+    target.classList.toggle("warning", !!profile && (!saved || modified));
+  }
+}
+function profilesPage(main) {
+  const device = current();
+  const profiles = state.profiles.filter(profile => profile.device_id === device.id);
+  const saved = state.config.devices.some(item => item.id === device.id);
+  const lighting = lightingDrafts.get(device.id)
+    || state.lighting[device.id]?.settings || state.lighting_defaults;
+  const nameDraft = {name: ""};
+  const create = button("Save new profile", async () => {
+    const result = await request("profiles", "PUT", profileSnapshot(device, nameDraft.name));
+    state.profiles = result.profiles;
+    loadedProfiles.set(device.id, structuredClone(result.profile));
+    lightingDrafts.set(device.id, structuredClone(result.profile.lighting));
+    render(); notify("Profile saved on the server. No configuration saved or commands sent.");
+  }, true);
+  create.disabled = !saved || profiles.length >= 20;
+  main.append(row(deviceSelector(config.devices)),
+    loadedProfileBanner(device),
+    hint("Profiles belong to this device. Restore loads a draft only; it does not save configuration or send device commands."),
+    card("Current profile draft",
+      node("ol", {}, ...device.screens.map(screen =>
+        node("li", {}, `${widgetNames[screen.kind]}${screen.title ? " / " + screen.title : ""}${screen.enabled ? " / automatic" : ""}`))),
+      hint(`Night schedule: ${device.night.enabled ? `${device.night.start} - ${device.night.end} (${device.night.mode})` : "off"}. Times use the application timezone, which is not changed by profiles.`),
+      hint(`Lighting: ${lighting.color.toUpperCase()}, ${lighting.brightness}%, power ${lighting.on ? "on" : "off"}. Uses the current lighting preview, otherwise last acknowledged settings, otherwise defaults.`),
+      row(button("Review screens", () => { page = "Screens"; render(); }),
+        button("Review lighting", () => { page = "Lighting"; render(); }),
+        button("Review night settings", () => { page = "Devices"; render(); })),
+      hint("Save configuration updates each loaded profile together with screens and night settings and activates enabled schedules. Use Send for an immediate unscheduled screen update; Apply lighting sends lighting separately.")),
+    card("Save this layout as a profile",
+      row(field(nameDraft, "name", "Profile name", "text", null, () => {}), create),
+      hint("Captures all five screen positions, content, accents, schedules, night settings and full lighting settings, including unsaved edits. Up to 20 profiles per device."),
+      hint("Device identity, connection, credentials, Strava authorisation, UI theme, runtime sleep/tool state and lighting startup-restore approval are not included. Uploaded media is referenced, not copied."),
+      saved ? null : hint("Save this device's configuration before creating profiles.")));
+
+  const list = node("div", {class: "grid profile-cards"});
+  for (const profile of profiles) {
+    const rename = {name: profile.name};
+    const clone = {name: `${profile.name.slice(0, 35)} copy`};
+    list.append(card(profile.name,
+      field(rename, "name", `Name for ${profile.name}`, "text", null, () => {}),
+      row(button("Restore profile", async () => {
+        if (!confirm(`Load "${profile.name}" into this device's editor, replacing its screen, night and lighting drafts? Saved settings remain unchanged until you explicitly save/apply.`)) return;
+        const snapshot = await request(`profiles/${profile.id}`);
+        if (snapshot.device_id !== device.id) throw Error("This profile belongs to another device.");
+        device.screens = structuredClone(snapshot.screens);
+        device.night = structuredClone(snapshot.night);
+        lightingDrafts.set(device.id, structuredClone(snapshot.lighting));
+        loadedProfiles.set(device.id, structuredClone(snapshot));
+        mark(); render();
+        notify(`"${snapshot.name}" loaded for review. Save configuration and Apply lighting only when ready.`);
+      }, true), button("Rename", async () => {
+        const result = await request(`profiles/${profile.id}`, "PATCH", rename);
+        state.profiles = result.profiles; render(); notify("Profile renamed.");
+      }), button("Update snapshot", async () => {
+        if (!confirm(`Replace "${profile.name}" with this device's current screen, night and lighting drafts?`)) return;
+        const result = await request("profiles", "PUT", {
+          ...profileSnapshot(device, profile.name), id: profile.id,
+        });
+        if (loadedProfiles.get(device.id)?.id === profile.id) {
+          loadedProfiles.set(device.id, structuredClone(result.profile));
+        }
+        state.profiles = result.profiles; render(); notify("Profile updated. Nothing sent.");
+      }), button("Delete", async () => {
+        if (!confirm(`Delete profile "${profile.name}"? Current settings and uploaded media will not be changed.`)) return;
+        const result = await request(`profiles/${profile.id}`, "DELETE");
+        if (loadedProfiles.get(device.id)?.id === profile.id) loadedProfiles.delete(device.id);
+        state.profiles = result.profiles; render(); notify("Profile deleted.");
+      })),
+      row(field(clone, "name", `Clone name for ${profile.name}`, "text", null, () => {}),
+        button("Clone profile", async () => {
+          const result = await request(`profiles/${profile.id}/clone`, "POST", clone);
+          state.profiles = result.profiles; render();
+          notify(`"${result.profile.name}" cloned from the saved profile. Current drafts were not changed.`);
+        }))));
+  }
+  main.append(card(`Saved profiles (${profiles.length}/20)`,
+    profiles.length ? list : hint("No profiles saved for this device yet.")));
 }
 function mediaPage(main) {
   const upload = node("input", {type: "file", accept: ".gif,.png,.jpg,.jpeg,.webp", "aria-label": "Image or GIF"});
@@ -887,7 +1024,9 @@ function lightingPage(main) {
   for (const item of state.config.devices) selector.append(node("option", {value: item.id}, item.name));
   selector.value = device.id;
   selector.addEventListener("change", () => { selected = selector.value; render(); });
-  main.append(row(selector), hint(`Uses the saved connection: ${device.host || "not configured"}. Save connection changes in Devices first. Lighting does not change screen content or schedules.`));
+  main.append(row(selector), loadedProfileBanner(device),
+    hint(`Uses the saved connection: ${device.host || "not configured"}. Save connection changes in Devices first. Apply lighting does not change screen content or schedules.`),
+    hint("With a loaded profile, Save configuration saves its lighting preview together with screen and night settings. Lighting is sent only by Apply lighting."));
 
   const back = node("div", {class: "lighting-glow", "aria-hidden": "true"});
   const edgeLeft = node("div", {class: "lighting-edge lighting-edge-left", "aria-hidden": "true"});
@@ -924,6 +1063,7 @@ function lightingPage(main) {
     percentage.textContent = `${settings.brightness}%`;
     colourValue.textContent = settings.color.toUpperCase();
     updateLightingStatus();
+    updateUnsavedConfiguration();
   };
   const colour = field(settings, "color", "Lighting colour", "color", null, draw);
   const brightness = node("input", {
@@ -1262,7 +1402,7 @@ function settingsPage(main) {
       hint("Keep the media port reachable by the device over HTTP without redirects. Restrict administration to your LAN or an authenticated HTTPS reverse proxy."),
       hint("Settings and tokens are stored unencrypted in the private SQLite data directory. Back up the data and media directories together while the services are stopped."),
       button("Sign out", async () => {
-        if (dirty && !confirm("Sign out and discard unsaved changes?")) return;
+        if ((dirty || lightingDrafts.size) && !confirm("Sign out and discard unsaved changes?")) return;
         await request("auth/logout", "POST"); login();
       })));
 }
